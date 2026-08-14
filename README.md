@@ -101,17 +101,6 @@ node scripts/build-pptx.mjs \
 
 完整的输入 JSON 说明见 `skills/ppt-maker/references/PptxGenJS脚本使用说明.md`。
 
-## 发布前的资产检查
-
-仓库代码和文档可按 MIT License 发布，但以下文件必须由发布者确认具有公开分发权，或在公开前替换、删除：
-
-- `skills/ppt-maker/assets/logo.png`
-- `skills/ppt-maker/assets/模板.pptx`
-- `skills/ppt-maker/assets/样例.pptx`
-- `skills/ppt-maker/assets/samples/` 中的截图
-
-仓库的 MIT License 不会自动授予企业名称、商标、Logo、模板和业务样例的使用权。
-
 ## License
 
 本仓库自行编写的代码和文档采用 [MIT License](LICENSE)。第三方软件、字体和品牌资产适用各自的许可证或权利声明，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
