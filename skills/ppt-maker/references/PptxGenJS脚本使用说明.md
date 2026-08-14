@@ -85,13 +85,26 @@ node scripts/render-pptx.mjs --input output/example.pptx --output output/rendere
     "sources": [{"id": "source-1", "path": "source.docx", "sha256": "可选"}],
     "sections": [{"id": "section-1", "title": "一级标题原文"}],
     "textItems": [{"id": "text-1", "text": "必须原样保留的文字"}],
-    "tables": [{"id": "table-1", "rows": 12, "columns": 6, "headerRows": 2}],
-    "media": [{"id": "image-1", "path": "extracted/image1.png"}]
+    "tables": [{
+      "id": "table-1",
+      "bodyRows": 12,
+      "logicalColumns": 6,
+      "headerRowCount": 3,
+      "rowHeaderColumns": 2,
+      "headerRowsData": [
+        [{"text":"类别","rowspan":3},{"text":"指标","rowspan":3},{"text":"业务部门","colspan":4}],
+        [{"text":"部门A","colspan":2},{"text":"部门B","colspan":2}],
+        ["目标","已完成","目标","已完成"]
+      ],
+      "bodyRowsData": [["分类1","指标1","10","8","12","11"]]
+    }],
+    "media": [{"id": "image-1", "path": "extracted/image1.png"}],
+    "contentGroups": [{"id": "group-1", "sourceOrder": 1, "keepTogether": true, "preferredFlow": "single-column"}]
   }
 }
 ```
 
-目录项、页面、模块或内容块使用`sourceRef`或`sourceRefs`引用清单条目。目录项推荐使用`{"title":"一级标题原文","sourceRef":"section-1"}`。默认条目均为必需项；经用户确认可以省略时写入非空`omittedReason`。审计会拒绝：一级标题未出现在目录、必需文字被改写、表格行列数不符、缺失最左列、必需媒体未使用、源文件不存在或SHA-256不一致。
+目录项、页面、模块或内容块使用`sourceRef`或`sourceRefs`引用清单条目。内容页还必须使用`contentGroupRef`和`layoutFlow`声明语义组及阅读流。默认条目均为必需项；经用户确认可以省略时写入非空`omittedReason`。审计会拒绝：一级标题缺失、必需文字被改写、表格多级表头/二维矩阵/行列方向不符、未经确认分栏或拆页、必需媒体未使用、源文件不存在或SHA-256不一致。
 
 ## 页面类型
 
@@ -113,7 +126,9 @@ node scripts/render-pptx.mjs --input output/example.pptx --output output/rendere
 
 - `title`：页面标题。
 - `summary`：标题下方的一句话结论。
-- `columns`：模块列数，范围 1–4；缺省时根据模块数量自动计算。
+- `columns`：模块列数，范围1–4；缺省时为1。只有大纲确认并列/对照关系时才显式设置为多列。
+- `layoutFlow`：`single-column`、`multi-column`、`full-table`或`mixed`，必须与`sourceManifest.contentGroups[].preferredFlow`一致。
+- `contentGroupRef`：该页对应的语义组；一个组默认只能出现于一页。
 - `gap`：模块间距，单位为英寸。
 - `visualExemptionReason`：仅当本页确为无稳定字段、无数值关系的纯叙述页时填写；非空时允许本页没有结构化内容块。
 
@@ -162,10 +177,11 @@ node scripts/render-pptx.mjs --input output/example.pptx --output output/rendere
 - 单行表头使用`headers`；多级表头使用`headerRows`。
 - 单元格可以是字符串，也可以是`{"text":"标题","rowspan":2,"colspan":1}`。
 - `colWidths`必须与逻辑列数一致。脚本会核对每个正文行的逻辑列数，禁止通过少写第一列或其他字段来适配页面。
-- 脚本按列宽、文字长度、10号字和1.3倍行距估算行高。单表超过目标区域时：
-  - `splitMode: "auto"`（默认）：列数不多且左右仍可读时自动拆成两个重复表头的左右表格；独立`table`页面中的宽表自动拆成连续页面。复杂内容模块中的宽表会报错，要求在大纲阶段改为独立表格页。
-  - `splitMode: "columns"`：要求左右双表；若两个表仍放不下则报错。
-  - `splitMode: "none"`：禁止自动拆分；只要超高即报错。
+- 脚本按列宽、文字长度、10号字和1.3倍行距估算行高。超高表格默认`splitMode: "none"`并报错，禁止生成阶段自动决定拆分。
+- 只有大纲已确认拆分时，才能同时提供非空`splitReason`和`approvalRef`，并选择：
+  - `splitMode: "rows-two-column"`：按正文行拆成左右两个表，重复完整多级表头和全部逻辑列；兼容旧值`columns`。
+  - `splitMode: "paginate"`：仅用于独立表格页，按正文行生成连续页。
+- 每个表格块必须声明`orientation: "source"`和`rowHeaderColumns`。不得使用转置或拆列解决容量问题。
 - 脚本不会通过缩小到10号字以下、越过模块边框或删除数据来完成布局。
 
 内容页默认按模块内容量分配行列尺寸。需要精确复合布局时，可给每个模块提供归一化`layout: {"x":0,"y":0,"w":0.6,"h":1}`；所有模块必须位于0–1的内容区域内且不得重叠。
@@ -182,7 +198,7 @@ node scripts/render-pptx.mjs --input output/example.pptx --output output/rendere
 
 ## 验收边界
 
-`audit-deck.mjs`检查源内容清单、原文、表格行列、媒体引用和结构化表达。默认情况下，每个内容页至少包含 `metrics`、`matrix`、`callout`、`table`、`chart` 或 `image` 之一；明显的“标签：说明”长列表会失败。`validate-pptx.mjs`检查 ZIP/OOXML 文件结构、必要条目、页面关系、页数和对象页面边界。二者都不能完全证明视觉效果正常。正式交付前仍须使用`render-pptx.mjs`或可靠的PowerPoint、LibreOffice、WPS能力把所有页面渲染为图片，并逐页进行视觉检查。
+`audit-deck.mjs`检查源内容清单、原文、表格多级表头与正文二维矩阵、媒体引用、内容组、阅读流和拆页依据。`validate-pptx.mjs`检查ZIP/OOXML、页面关系、对象外框，以及表格各行实际高度是否超出表格框或页面。形状模拟表格和模块语义边界仍必须通过全页渲染检查；不得把结构检查通过表述成视觉验收通过。
 
 如果渲染失败，只能报告“内容和结构审计通过，视觉验收未完成”。不得用OOXML检查代替视觉验收，也不得为了继续任务而后台安装`python-pptx`或其他依赖。
 

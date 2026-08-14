@@ -17,6 +17,20 @@ function cellColspan(cell) {
   return Number.isInteger(value) && value > 0 ? value : 1;
 }
 
+function cellRowspan(cell) {
+  if (!cell || typeof cell !== "object" || Array.isArray(cell)) return 1;
+  const value = Number(cell.rowspan ?? cell.options?.rowspan ?? 1);
+  return Number.isInteger(value) && value > 0 ? value : 1;
+}
+
+function canonicalRows(rows) {
+  return JSON.stringify((rows ?? []).map((row) => (row ?? []).map((cell) => ({
+    text: cellText(cell),
+    colspan: cellColspan(cell),
+    rowspan: cellRowspan(cell),
+  }))));
+}
+
 function logicalColumns(row) {
   return Array.isArray(row) ? row.reduce((sum, cell) => sum + cellColspan(cell), 0) : 0;
 }
@@ -148,12 +162,21 @@ function collectDeck(deck) {
       });
     }
     slideStructures.push({
+      index: slideIndex,
       location: slideLocation,
       title: String(slide?.title ?? slide?.heading ?? ""),
       type: String(slide?.type ?? "content").toLowerCase(),
       types: [...slideTypes],
       visualExemptionReason: String(slide?.visualExemptionReason ?? "").trim(),
+      contentGroupRef: String(slide?.contentGroupRef ?? "").trim(),
+      layoutFlow: String(slide?.layoutFlow ?? "").trim(),
+      columns: Number.isInteger(slide?.columns) ? slide.columns : 1,
+      moduleCount: Array.isArray(slide?.modules) ? slide.modules.length : 0,
+      splitReason: String(slide?.splitReason ?? "").trim(),
+      approvalRef: String(slide?.approvalRef ?? "").trim(),
+      continuationIndex: Number(slide?.continuationIndex),
     });
+    addRefs(slide?.contentGroupRef);
   }
   return { text: text.join("\n"), refs, tables, images, agendaTitles, slideStructures, moduleStructures };
 }
@@ -185,11 +208,11 @@ export function auditDeckSpec(deck, { inputDir = process.cwd() } = {}) {
     };
   }
 
-  for (const key of ["sources", "sections", "textItems", "tables", "media"]) {
+  for (const key of ["sources", "sections", "textItems", "tables", "media", "contentGroups"]) {
     if (manifest[key] !== undefined && !Array.isArray(manifest[key])) errors.push(`sourceManifest.${key} 必须是数组。`);
   }
 
-  const collections = ["sources", "sections", "textItems", "tables", "media"];
+  const collections = ["sources", "sections", "textItems", "tables", "media", "contentGroups"];
   const ids = new Set();
   for (const collection of collections) {
     for (const [index, item] of (manifest[collection] ?? []).entries()) {
@@ -203,6 +226,10 @@ export function auditDeckSpec(deck, { inputDir = process.cwd() } = {}) {
 
   const collected = collectDeck(deck);
   const deckText = normalizeText(collected.text);
+  const auditableSlides = collected.slideStructures.filter((slide) => slide.type === "content" || slide.type === "table");
+  if (auditableSlides.length > 0 && (!Array.isArray(manifest.contentGroups) || manifest.contentGroups.length === 0)) {
+    errors.push("sourceManifest.contentGroups 不能为空；无法核对页面是否被无依据分栏、拆模块或拆页。");
+  }
 
   for (const source of manifest.sources ?? []) {
     if (!required(source)) continue;
@@ -247,17 +274,97 @@ export function auditDeckSpec(deck, { inputDir = process.cwd() } = {}) {
       errors.push(`必需表格 ${expected.id} 没有对应的 table 内容块。`);
       continue;
     }
+    const expectedRows = Number.isInteger(expected.bodyRows) ? expected.bodyRows : expected.rows;
+    const expectedColumns = Number.isInteger(expected.logicalColumns) ? expected.logicalColumns : expected.columns;
+    const expectedHeaderRows = Number.isInteger(expected.headerRowCount) ? expected.headerRowCount : expected.headerRows;
+    for (const field of ["bodyRows", "logicalColumns", "headerRowCount", "rowHeaderColumns", "headerRowsData", "bodyRowsData"]) {
+      if (expected[field] === undefined) errors.push(`表格 ${expected.id} 的 sourceManifest 缺少 ${field}，无法检出转置、表头吞并或单元格丢失。`);
+    }
     const actualRows = matches.reduce((sum, table) => sum + (table.rows?.length ?? 0), 0);
     const actualColumns = Math.max(...matches.map(tableColumns));
     const actualHeaderRows = Math.max(...matches.map((table) => tableHeaderRows(table).length));
-    if (Number.isInteger(expected.rows) && actualRows !== expected.rows) {
-      errors.push(`表格 ${expected.id} 行数不符：源表 ${expected.rows} 行，输入 ${actualRows} 行。`);
+    if (Number.isInteger(expectedRows) && actualRows !== expectedRows) {
+      errors.push(`表格 ${expected.id} 正文行数不符：源表 ${expectedRows} 行，输入 ${actualRows} 行。`);
     }
-    if (Number.isInteger(expected.columns) && actualColumns !== expected.columns) {
-      errors.push(`表格 ${expected.id} 列数不符：源表 ${expected.columns} 列，输入 ${actualColumns} 列；禁止删除最左列或其他字段。`);
+    if (Number.isInteger(expectedColumns) && actualColumns !== expectedColumns) {
+      errors.push(`表格 ${expected.id} 逻辑列数不符：源表 ${expectedColumns} 列，输入 ${actualColumns} 列；禁止删除最左列或其他字段。`);
     }
-    if (Number.isInteger(expected.headerRows) && actualHeaderRows !== expected.headerRows) {
-      errors.push(`表格 ${expected.id} 表头行数不符：源表 ${expected.headerRows} 行，输入 ${actualHeaderRows} 行。`);
+    if (Number.isInteger(expectedHeaderRows) && actualHeaderRows !== expectedHeaderRows) {
+      errors.push(`表格 ${expected.id} 表头行数不符：源表 ${expectedHeaderRows} 行，输入 ${actualHeaderRows} 行；不得吞并父表头下的子表头。`);
+    }
+    for (const table of matches) {
+      if (String(table.orientation ?? "").toLowerCase() !== "source") {
+        errors.push(`表格 ${expected.id} 在 ${table.location} 未声明 orientation: "source"；禁止转置或重排源表。`);
+      }
+      if (Number.isInteger(expected.rowHeaderColumns) && Number(table.rowHeaderColumns) !== expected.rowHeaderColumns) {
+        errors.push(`表格 ${expected.id} 在 ${table.location} 的行表头列数不符：源表 ${expected.rowHeaderColumns} 列，输入 ${table.rowHeaderColumns ?? "未声明"} 列。`);
+      }
+      if (Array.isArray(expected.headerRowsData) && canonicalRows(tableHeaderRows(table)) !== canonicalRows(expected.headerRowsData)) {
+        errors.push(`表格 ${expected.id} 在 ${table.location} 的多级表头文字、顺序或合并关系与源表不一致。`);
+      }
+    }
+    if (Array.isArray(expected.bodyRowsData)) {
+      const actualBodyRows = matches.flatMap((table) => table.rows ?? []);
+      if (canonicalRows(actualBodyRows) !== canonicalRows(expected.bodyRowsData)) {
+        errors.push(`表格 ${expected.id} 的正文二维矩阵与源表不一致；可能存在转置、字段重排、分组数据被吞并或单元格改写。`);
+      }
+    }
+    if (matches.length > 1) {
+      for (const table of matches) {
+        if (!String(table.splitReason ?? "").trim() || !String(table.approvalRef ?? "").trim()) {
+          errors.push(`表格 ${expected.id} 被拆成 ${matches.length} 个表格块，但 ${table.location} 缺少 splitReason 或 approvalRef。`);
+        }
+      }
+    }
+  }
+
+  const requiredGroups = (manifest.contentGroups ?? []).filter(required);
+  if (requiredGroups.length > 0) {
+    const contentSlides = collected.slideStructures.filter((slide) => slide.type === "content" || slide.type === "table");
+    for (const slide of contentSlides) {
+      if (!slide.contentGroupRef) errors.push(`${slide.location}“${slide.title}”缺少 contentGroupRef，无法核对是否被无依据分栏或拆页。`);
+      if (!slide.layoutFlow) errors.push(`${slide.location}“${slide.title}”缺少 layoutFlow；连续内容必须显式声明 single-column。`);
+      if (slide.layoutFlow === "single-column" && slide.columns !== 1) {
+        errors.push(`${slide.location}“${slide.title}”声明单列阅读流，但 columns=${slide.columns}。`);
+      }
+    }
+    for (const group of requiredGroups) {
+      if (!Number.isFinite(Number(group.sourceOrder))) errors.push(`内容组 ${group.id} 缺少数字 sourceOrder。`);
+      if (group.keepTogether === undefined) errors.push(`内容组 ${group.id} 缺少 keepTogether；默认单页归属必须显式记录。`);
+      if (!String(group.preferredFlow ?? "").trim()) errors.push(`内容组 ${group.id} 缺少 preferredFlow。`);
+      const matches = contentSlides.filter((slide) => slide.contentGroupRef === group.id);
+      if (matches.length === 0) {
+        errors.push(`必需内容组 ${group.id} 没有对应页面。`);
+        continue;
+      }
+      const preferredFlow = String(group.preferredFlow ?? "single-column");
+      for (const slide of matches) {
+        if (slide.layoutFlow && slide.layoutFlow !== preferredFlow) {
+          errors.push(`内容组 ${group.id} 要求 ${preferredFlow}，但 ${slide.location} 使用 ${slide.layoutFlow}。`);
+        }
+      }
+      const keepTogether = group.keepTogether !== false;
+      if (matches.length > 1 && (keepTogether || group.allowSlideSplit !== true)) {
+        errors.push(`内容组 ${group.id} 默认应保持单页，却被拆成 ${matches.length} 页；必须先证明单页无法容纳并获得用户确认。`);
+      }
+      if (matches.length > 1 && group.allowSlideSplit === true) {
+        const evidence = group.capacityEvidence;
+        if (!evidence || evidence.singlePageAttempted !== true || !Number.isFinite(Number(evidence.requiredHeight)) || !Number.isFinite(Number(evidence.availableHeight)) || Number(evidence.requiredHeight) <= Number(evidence.availableHeight)) {
+          errors.push(`内容组 ${group.id} 缺少有效 capacityEvidence；拆页前必须证明单页所需高度大于可用高度。`);
+        }
+        matches.forEach((slide, index) => {
+          if (!slide.splitReason || !slide.approvalRef) errors.push(`${slide.location} 属于拆分内容组 ${group.id}，但缺少 splitReason 或 approvalRef。`);
+          if (slide.continuationIndex !== index + 1) errors.push(`${slide.location} 的 continuationIndex 应为 ${index + 1}。`);
+        });
+      }
+    }
+    const ordered = contentSlides
+      .map((slide) => ({ slide, group: requiredGroups.find((group) => group.id === slide.contentGroupRef) }))
+      .filter((item) => item.group && Number.isFinite(Number(item.group.sourceOrder)));
+    for (let index = 1; index < ordered.length; index += 1) {
+      if (Number(ordered[index].group.sourceOrder) < Number(ordered[index - 1].group.sourceOrder)) {
+        errors.push(`${ordered[index].slide.location} 的内容组顺序早于前一页，违反源文档连续顺序。`);
+      }
     }
   }
 
@@ -310,7 +417,7 @@ export function auditDeckSpec(deck, { inputDir = process.cwd() } = {}) {
     }
   }
 
-  const requiredReferenceIds = ["sections", "textItems", "tables", "media"]
+  const requiredReferenceIds = ["sections", "textItems", "tables", "media", "contentGroups"]
     .flatMap((collection) => (manifest[collection] ?? []).filter(required).map((item) => item.id));
   const requiredSourceIds = (manifest.sources ?? []).filter(required).map((item) => item.id);
   for (const ref of collected.refs) {
@@ -330,6 +437,7 @@ export function auditDeckSpec(deck, { inputDir = process.cwd() } = {}) {
       sections: manifest.sections?.length ?? 0,
       tables: manifest.tables?.length ?? 0,
       media: manifest.media?.length ?? 0,
+      contentGroups: manifest.contentGroups?.length ?? 0,
       discoveredTableBlocks: collected.tables.length,
       discoveredImageBlocks: collected.images.length,
       structuredSlides: collected.slideStructures.filter((slide) => slide.types.some((type) => structuredTypes.has(type))).length,

@@ -734,10 +734,16 @@ function addTableBlock(slide, context, block, box) {
     return;
   }
 
-  const splitMode = String(block.splitMode ?? "auto").toLowerCase();
-  if (!["auto", "columns", "none"].includes(splitMode)) throw new Error(`不支持的表格 splitMode：${splitMode}`);
+  const splitMode = String(block.splitMode ?? "none").toLowerCase();
+  if (!["rows-two-column", "columns", "paginate", "none"].includes(splitMode)) throw new Error(`不支持的表格 splitMode：${splitMode}`);
   if (splitMode === "none") {
-    throw new Error(`表格预计需要 ${totalHeight.toFixed(2)} 英寸高度，但区域只有 ${box.h.toFixed(2)} 英寸；必须拆分，不得越过模块或页面边界。`);
+    throw new Error(`表格预计需要 ${totalHeight.toFixed(2)} 英寸高度，但区域只有 ${box.h.toFixed(2)} 英寸；请先在大纲中确认拆分方案，不得自动分栏、越界或裁切。`);
+  }
+  if (!String(block.splitReason ?? "").trim() || !String(block.approvalRef ?? "").trim()) {
+    throw new Error("表格拆分必须显式提供 splitReason 和 approvalRef；禁止生成阶段自动决定拆分。 ");
+  }
+  if (splitMode === "paginate") {
+    throw new Error("模块内表格不能直接 paginate；请在大纲阶段改为独立连续表格页。 ");
   }
   if (columnCount > Number(block.maxColumnsForSideSplit ?? 6) || box.w < 8) {
     throw new Error(`表格有 ${columnCount} 列且纵向超高，不适合左右并排；请在大纲阶段拆成连续页面，每页保留全部列和重复表头。`);
@@ -841,11 +847,7 @@ function addModule(slide, context, module, box) {
 
 function gridColumns(count, requested) {
   if (Number.isInteger(requested) && requested >= 1 && requested <= 4) return requested;
-  if (count <= 1) return 1;
-  if (count <= 3) return count;
-  if (count === 4) return 2;
-  if (count <= 6) return 3;
-  return 4;
+  return 1;
 }
 
 function normalizedSegments(weights, start, length, gap) {
@@ -996,21 +998,13 @@ function expandOversizedTableSlides(slides) {
     const widths = normalizeColumnWidths(block, columnCount, box.w);
     const totalHeight = [...headerRows.map((row) => estimateTableRowHeight(row, widths, { header: true })), ...(block.rows ?? []).map((row) => estimateTableRowHeight(row, widths))]
       .reduce((sum, value) => sum + value, 0);
-    if (totalHeight <= box.h + 0.02 || String(block.splitMode ?? "auto").toLowerCase() !== "auto") {
+    const splitMode = String(block.splitMode ?? "none").toLowerCase();
+    if (totalHeight <= box.h + 0.02 || splitMode !== "paginate") {
       expanded.push(spec);
       continue;
     }
-
-    let canUseTwoColumns = false;
-    if (columnCount <= Number(block.maxColumnsForSideSplit ?? 6)) {
-      const gap = Number.isFinite(block.splitGap) ? block.splitGap : 0.16;
-      const segmentWidth = (box.w - gap) / 2;
-      const segmentWidths = normalizeColumnWidths(block, columnCount, segmentWidth);
-      canUseTwoColumns = Boolean(splitRowsByHeight(block.rows ?? [], segmentWidths, headerRows, box.h).segments);
-    }
-    if (canUseTwoColumns) {
-      expanded.push(spec);
-      continue;
+    if (!String(block.splitReason ?? "").trim() || !String(block.approvalRef ?? "").trim()) {
+      throw new Error(`表格页“${spec.title || "表格"}”要求分页，但缺少 splitReason 或 approvalRef。`);
     }
 
     const chunks = paginateTableRows(block, box);
@@ -1018,7 +1012,10 @@ function expandOversizedTableSlides(slides) {
       expanded.push({
         ...spec,
         title: index === 0 ? spec.title : `${spec.title || "表格"}（续${index}）`,
-        table: { ...block, rows, splitMode: "none" },
+        splitReason: block.splitReason,
+        approvalRef: block.approvalRef,
+        continuationIndex: index + 1,
+        table: { ...block, rows, splitMode: "none", splitReason: block.splitReason, approvalRef: block.approvalRef },
       });
     });
   }

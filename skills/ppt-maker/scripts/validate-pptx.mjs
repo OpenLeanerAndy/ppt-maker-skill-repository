@@ -124,6 +124,35 @@ function slideBoundsIssues(xml, slideWidth, slideHeight) {
   return issues;
 }
 
+function tableRenderedBoundsIssues(xml, slideHeight) {
+  const issues = [];
+  const frames = [...xml.matchAll(/<p:graphicFrame\b[\s\S]*?<\/p:graphicFrame>/g)];
+  let tableIndex = 0;
+  for (const frameMatch of frames) {
+    const frame = frameMatch[0];
+    if (!frame.includes("<a:tbl>")) continue;
+    tableIndex += 1;
+    const offset = frame.match(/<a:off\b([^>]*)\/>/);
+    const extent = frame.match(/<a:ext\b([^>]*)\/>/);
+    if (!offset || !extent) continue;
+    const y = xmlNumber(offset[1], "y");
+    const frameHeight = xmlNumber(extent[1], "cy");
+    const rowHeights = [...frame.matchAll(/<a:tr\b([^>]*)>/g)]
+      .map((match) => xmlNumber(match[1], "h"))
+      .filter((value) => value !== null);
+    if (y === null || frameHeight === null || rowHeights.length === 0) continue;
+    const renderedHeight = rowHeights.reduce((sum, value) => sum + value, 0);
+    const tolerance = 1000;
+    if (renderedHeight > frameHeight + tolerance) {
+      issues.push({ table: tableIndex, type: "rows-exceed-frame", y, frameHeight, renderedHeight });
+    }
+    if (y + renderedHeight > slideHeight + tolerance) {
+      issues.push({ table: tableIndex, type: "rows-exceed-slide", y, frameHeight, renderedHeight });
+    }
+  }
+  return issues;
+}
+
 export function validatePptx(filePath, options = {}) {
   const absolutePath = path.resolve(filePath);
   const errors = [];
@@ -175,6 +204,7 @@ export function validatePptx(filePath, options = {}) {
   let slideHeight = null;
   let tableCount = 0;
   const slideTableCounts = [];
+  const slideTableRenderedBounds = [];
   try {
     const presentationEntry = entryMap.get("ppt/presentation.xml");
     if (presentationEntry) {
@@ -193,6 +223,14 @@ export function validatePptx(filePath, options = {}) {
         slideTableCounts.push({ slide: naturalSlideNumber(slide.name), tables: tablesOnSlide });
         const bounds = slideBoundsIssues(xml, slideWidth, slideHeight);
         if (bounds.length > 0) errors.push(`${slide.name} 有 ${bounds.length} 个对象超出页面边界。`);
+        const renderedBounds = tableRenderedBoundsIssues(xml, slideHeight);
+        if (renderedBounds.length > 0) {
+          slideTableRenderedBounds.push({ slide: naturalSlideNumber(slide.name), issues: renderedBounds });
+          const frameIssues = renderedBounds.filter((issue) => issue.type === "rows-exceed-frame").length;
+          const slideIssues = renderedBounds.filter((issue) => issue.type === "rows-exceed-slide").length;
+          if (frameIssues > 0) errors.push(`${slide.name} 有 ${frameIssues} 个表格的实际行高之和超出表格对象框，可能越过所属模块。`);
+          if (slideIssues > 0) errors.push(`${slide.name} 有 ${slideIssues} 个表格按实际行高计算超出页面下边界。`);
+        }
       }
     } else warnings.push("无法读取幻灯片尺寸，未执行对象边界检查。 ");
   } catch (error) {
@@ -240,6 +278,8 @@ export function validatePptx(filePath, options = {}) {
   if (duplicateMediaGroups.length > 0) warnings.push(`发现 ${duplicateMediaGroups.length} 组重复媒体资源，可考虑通过幻灯片母版复用。`);
   const result = {
     ok: errors.length === 0,
+    scope: "structural",
+    visualInspectionRequired: true,
     file: absolutePath,
     size: buffer.length,
     entries: entries.length,
@@ -249,6 +289,7 @@ export function validatePptx(filePath, options = {}) {
     charts: charts.length,
     tables: tableCount,
     slideTableCounts,
+    slideTableRenderedBounds,
     errors,
     warnings,
   };
@@ -261,6 +302,7 @@ function printResult(result, json) {
     return;
   }
   console.log(`PPTX 结构校验：${result.ok ? "通过" : "失败"}`);
+  console.log("范围：仅ZIP/OOXML结构与可计算边界；仍须渲染全部页面完成视觉验收。");
   console.log(`文件：${result.file}`);
   if (result.size !== undefined) console.log(`大小：${result.size} 字节`);
   if (result.slides !== undefined) {

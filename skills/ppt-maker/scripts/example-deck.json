@@ -23,9 +23,16 @@
     "tables": [
       {
         "id": "table-plan",
-        "rows": 3,
-        "columns": 4,
-        "headerRows": 1
+        "bodyRows": 3,
+        "logicalColumns": 4,
+        "headerRowCount": 1,
+        "rowHeaderColumns": 1,
+        "headerRowsData": [["阶段", "主要任务", "计划周期", "状态"]],
+        "bodyRowsData": [
+          ["准备", "确认大纲与素材", "第1周", "已完成"],
+          ["制作", "生成并调整页面", "第2周", "进行中"],
+          ["验收", "结构与视觉检查", "第3周", "待开始"]
+        ]
       }
     ],
     "media": [
@@ -33,6 +40,11 @@
         "id": "media-logo-example",
         "path": "../assets/logo.png"
       }
+    ],
+    "contentGroups": [
+      {"id": "group-overview", "sourceOrder": 1, "keepTogether": true, "preferredFlow": "multi-column"},
+      {"id": "group-metrics", "sourceOrder": 2, "keepTogether": true, "preferredFlow": "multi-column"},
+      {"id": "group-plan", "sourceOrder": 3, "keepTogether": true, "preferredFlow": "full-table"}
     ]
   },
   "agenda": [
@@ -68,6 +80,8 @@
     {
       "type": "content",
       "title": "方案概览",
+      "contentGroupRef": "group-overview",
+      "layoutFlow": "multi-column",
       "summary": "采用“内容结构化—页面生成—结构校验”的可复用流程。",
       "columns": 3,
       "columnWeights": [1.1, 1.0, 1.2],
@@ -112,6 +126,8 @@
     {
       "type": "content",
       "title": "关键指标",
+      "contentGroupRef": "group-metrics",
+      "layoutFlow": "multi-column",
       "summary": "图表和图片均作为演示文稿原生内容写入。",
       "columns": 2,
       "modules": [
@@ -150,9 +166,13 @@
     {
       "type": "table",
       "title": "实施计划",
+      "contentGroupRef": "group-plan",
+      "layoutFlow": "full-table",
       "summary": "下表展示独立表格页的基础样式。",
       "table": {
         "sourceRef": "table-plan",
+        "orientation": "source",
+        "rowHeaderColumns": 1,
         "headers": ["阶段", "主要任务", "计划周期", "状态"],
         "rows": [
           ["准备", "确认大纲与素材", "第1周", "已完成"],

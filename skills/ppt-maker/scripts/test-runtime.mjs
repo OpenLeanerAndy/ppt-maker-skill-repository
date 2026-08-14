@@ -14,6 +14,15 @@ function rows(count, columns) {
 }
 
 function testDeck() {
+  const tableRows = rows(30, 5);
+  const tableHeaders = [
+    [
+      { "text": "序号", "rowspan": 3 },
+      { "text": "业务部门", "colspan": 4 }
+    ],
+    [{ "text": "分组A", "colspan": 2 }, { "text": "分组B", "colspan": 2 }],
+    ["字段A", "字段B", "字段C", "字段D"]
+  ];
   return {
     title: "通用长表布局测试",
     logo: "assets/logo.png",
@@ -22,14 +31,28 @@ function testDeck() {
       sources: [],
       sections: [{ id: "section-fidelity", title: "原文保真" }],
       textItems: [{ id: "text-quote", text: "保留“原始引号”和12.3456精度。" }],
-      tables: [{ id: "table-long", rows: 30, columns: 5, headerRows: 2 }],
+      tables: [{
+        id: "table-long",
+        bodyRows: 30,
+        logicalColumns: 5,
+        headerRowCount: 3,
+        rowHeaderColumns: 1,
+        headerRowsData: tableHeaders,
+        bodyRowsData: tableRows,
+      }],
       media: [],
+      contentGroups: [
+        { id: "group-fidelity", sourceOrder: 1, keepTogether: true, preferredFlow: "multi-column" },
+        { id: "group-table", sourceOrder: 2, keepTogether: true, preferredFlow: "full-table" },
+      ],
     },
     slides: [
       { type: "title", title: "通用长表布局测试" },
       {
         type: "content",
         title: "原文保真",
+        contentGroupRef: "group-fidelity",
+        layoutFlow: "multi-column",
         sourceRef: "text-quote",
         columns: 2,
         modules: [
@@ -55,19 +78,18 @@ function testDeck() {
       {
         type: "table",
         title: "长表自动拆分",
+        contentGroupRef: "group-table",
+        layoutFlow: "full-table",
         table: {
           sourceRef: "table-long",
-          headerRows: [
-            [
-              { "text": "序号", "rowspan": 2 },
-              { "text": "分组A", "colspan": 2 },
-              { "text": "分组B", "colspan": 2 }
-            ],
-            ["字段A", "字段B", "字段C", "字段D"]
-          ],
-          rows: rows(30, 5),
+          orientation: "source",
+          rowHeaderColumns: 1,
+          headerRows: tableHeaders,
+          rows: tableRows,
           colWidths: [0.7, 1.5, 1.5, 1.5, 1.5],
-          splitMode: "auto"
+          splitMode: "rows-two-column",
+          splitReason: "单表按10号字和1.3倍行距计算后超过单页表格区高度，按正文行左右分段。",
+          approvalRef: "outline-approved"
         }
       },
       { type: "closing", title: "测试完成" }
@@ -103,6 +125,32 @@ const missingColumnAudit = auditDeckSpec(missingColumn);
 assert.equal(missingColumnAudit.ok, false, "删除最左列必须失败");
 assert(missingColumnAudit.errors.some((message) => message.includes("列数不符")), "错误应指出列数不符");
 
+const missingHeaderLevel = structuredClone(validDeck);
+missingHeaderLevel.slides[2].table.headerRows.pop();
+const missingHeaderAudit = auditDeckSpec(missingHeaderLevel);
+assert.equal(missingHeaderAudit.ok, false, "删除子表头必须失败");
+assert(missingHeaderAudit.errors.some((message) => message.includes("表头行数不符") || message.includes("多级表头")), "错误应指出多级表头不一致");
+
+const transposedTable = structuredClone(validDeck);
+transposedTable.slides[2].table.rows = transposedTable.slides[2].table.rows[0].map((_, column) => transposedTable.slides[2].table.rows.map((row) => row[column]));
+const transposedAudit = auditDeckSpec(transposedTable);
+assert.equal(transposedAudit.ok, false, "转置源表必须失败");
+assert(transposedAudit.errors.some((message) => message.includes("正文二维矩阵")), "错误应指出正文矩阵或方向不一致");
+
+const unauthorizedColumns = structuredClone(validDeck);
+unauthorizedColumns.sourceManifest.contentGroups[0].preferredFlow = "single-column";
+unauthorizedColumns.slides[1].layoutFlow = "single-column";
+unauthorizedColumns.slides[1].columns = 2;
+const columnsAudit = auditDeckSpec(unauthorizedColumns);
+assert.equal(columnsAudit.ok, false, "单列内容被无故分栏必须失败");
+assert(columnsAudit.errors.some((message) => message.includes("声明单列阅读流")), "错误应指出单列与columns冲突");
+
+const unauthorizedPageSplit = structuredClone(validDeck);
+unauthorizedPageSplit.slides.splice(2, 0, structuredClone(unauthorizedPageSplit.slides[1]));
+const pageSplitAudit = auditDeckSpec(unauthorizedPageSplit);
+assert.equal(pageSplitAudit.ok, false, "同一内容组被无依据拆页必须失败");
+assert(pageSplitAudit.errors.some((message) => message.includes("默认应保持单页")), "错误应指出内容组被无依据拆页");
+
 const changedQuote = structuredClone(validDeck);
 changedQuote.slides[1].modules[0].body = "保留「原始引号」和12.35精度。";
 const changedQuoteAudit = auditDeckSpec(changedQuote);
@@ -137,13 +185,27 @@ try {
   }
 
   const tooWide = structuredClone(validDeck);
-  tooWide.sourceManifest.tables[0] = { id: "table-long", rows: 30, columns: 7, headerRows: 1 };
+  const tooWideRows = rows(30, 7);
+  const tooWideHeaders = ["序号", "字段A", "字段B", "字段C", "字段D", "字段E", "字段F"];
+  tooWide.sourceManifest.tables[0] = {
+    id: "table-long",
+    bodyRows: 30,
+    logicalColumns: 7,
+    headerRowCount: 1,
+    rowHeaderColumns: 1,
+    headerRowsData: [tooWideHeaders],
+    bodyRowsData: tooWideRows,
+  };
   tooWide.slides[2].table = {
     sourceRef: "table-long",
-    headers: ["序号", "字段A", "字段B", "字段C", "字段D", "字段E", "字段F"],
-    rows: rows(30, 7),
+    orientation: "source",
+    rowHeaderColumns: 1,
+    headers: tooWideHeaders,
+    rows: tooWideRows,
     colWidths: [0.7, 1, 1, 1, 1, 1, 1],
-    splitMode: "auto",
+    splitMode: "paginate",
+    splitReason: "七列长表在单页无法保持10号字完整显示。",
+    approvalRef: "outline-approved",
   };
   const tooWideInput = path.join(temporary, "too-wide.json");
   fs.writeFileSync(tooWideInput, JSON.stringify(tooWide, null, 2), "utf8");
