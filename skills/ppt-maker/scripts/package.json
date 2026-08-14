@@ -1,0 +1,20 @@
+{
+  "name": "ppt-maker-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local PptxGenJS fallback runtime for the ppt-maker Agent Skill.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "preflight": "node preflight.mjs",
+    "build": "node build-pptx.mjs",
+    "validate": "node validate-pptx.mjs",
+    "smoke": "node build-pptx.mjs --input example-deck.json --output output/example.pptx"
+  },
+  "dependencies": {
+    "pptxgenjs": "4.0.1"
+  }
+}

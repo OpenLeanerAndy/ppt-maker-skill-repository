@@ -1,0 +1,134 @@
+{
+  "title": "PptxGenJS 脚本能力验证",
+  "department": "示例部门",
+  "date": "2026年8月",
+  "author": "ppt-maker",
+  "company": "",
+  "subject": "验证 ppt-maker 内置 PptxGenJS 生成能力",
+  "lang": "zh-CN",
+  "logo": false,
+  "agenda": [
+    "方案概览",
+    "关键指标",
+    "实施计划"
+  ],
+  "theme": {
+    "fontFace": "Source Han Sans SC",
+    "colors": {
+      "primary": "0B2791",
+      "secondary": "009ADD",
+      "text": "262626",
+      "muted": "666666",
+      "pale": "EAEFF7",
+      "tableHeader": "4472C4"
+    }
+  },
+  "slides": [
+    {
+      "type": "title",
+      "title": "PptxGenJS 脚本能力验证"
+    },
+    {
+      "type": "agenda",
+      "heading": "目录"
+    },
+    {
+      "type": "section",
+      "heading": "目录",
+      "current": 0
+    },
+    {
+      "type": "content",
+      "title": "方案概览",
+      "summary": "采用“内容结构化—页面生成—结构校验”的可复用流程。",
+      "columns": 3,
+      "modules": [
+        {
+          "title": "输入",
+          "blocks": [
+            {
+              "type": "bullets",
+              "items": [
+                "用户确认的页面大纲",
+                "每页的标题、结论与支撑材料",
+                "品牌颜色、字体和 Logo"
+              ]
+            }
+          ]
+        },
+        {
+          "title": "处理",
+          "body": "脚本读取 JSON，按页面类型与内容模块创建可编辑的文本、形状、表格、图表和图片。"
+        },
+        {
+          "title": "输出",
+          "metrics": [
+            {
+              "value": "100%",
+              "label": "元素可编辑"
+            },
+            {
+              "value": "16:9",
+              "label": "页面比例"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "content",
+      "title": "关键指标",
+      "summary": "图表和图片均作为演示文稿原生内容写入。",
+      "columns": 2,
+      "modules": [
+        {
+          "title": "季度完成量",
+          "chart": {
+            "chartType": "column",
+            "showLegend": false,
+            "series": [
+              {
+                "name": "完成量",
+                "labels": ["Q1", "Q2", "Q3", "Q4"],
+                "values": [62, 78, 91, 108]
+              }
+            ]
+          }
+        },
+        {
+          "title": "图片等比适配",
+          "blocks": [
+            {
+              "type": "image",
+              "path": "../assets/logo.png",
+              "altText": "ppt-maker 默认 Logo"
+            },
+            {
+              "type": "text",
+              "text": "图片会在模块区域内等比缩放，不会被拉伸变形。"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "实施计划",
+      "summary": "下表展示独立表格页的基础样式。",
+      "table": {
+        "headers": ["阶段", "主要任务", "计划周期", "状态"],
+        "rows": [
+          ["准备", "确认大纲与素材", "第1周", "已完成"],
+          ["制作", "生成并调整页面", "第2周", "进行中"],
+          ["验收", "结构与视觉检查", "第3周", "待开始"]
+        ],
+        "colWidths": [1.5, 5.2, 2.0, 1.6]
+      }
+    },
+    {
+      "type": "closing",
+      "title": "谢谢",
+      "subtitle": "示例文件仅用于验证脚本能力，请替换为真实汇报内容。"
+    }
+  ]
+}
