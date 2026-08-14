@@ -1,4 +1,4 @@
 interface:
   display_name: "PPT Maker"
-  short_description: "按照我约定的格式，使用用户提供的内容，生成符合规范的.pptx文件(或PPT型网页文件/图片)。"
-  default_prompt: "使用 $ppt-maker 按照我约定的格式，使用用户提供的内容，生成符合规范的.pptx文件(或PPT型网页文件/图片)。"
+  short_description: "高保真保留原文、数字、表格和图片，生成并逐页验收PPT。"
+  default_prompt: "使用 $ppt-maker 根据我提供的素材制作PPT，完整保留原文、数字、表格列与图片，并完成内容、结构和逐页视觉验收。"

@@ -35,6 +35,24 @@ function checkPowerPoint() {
   return candidates.filter((candidate) => fs.existsSync(candidate));
 }
 
+function probePowerPointCom() {
+  if (process.platform !== "win32") return { ok: false, detail: "仅 Windows 支持 PowerPoint COM。" };
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    "$ppt=New-Object -ComObject PowerPoint.Application",
+    "try { $null=$ppt.Version; Write-Output $ppt.Version } finally { $ppt.Quit(); [System.Runtime.InteropServices.Marshal]::ReleaseComObject($ppt) | Out-Null }",
+  ].join("; ");
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 30_000,
+    windowsHide: true,
+  });
+  return result.status === 0
+    ? { ok: true, detail: `PowerPoint COM ${result.stdout.trim() || "可用"}` }
+    : { ok: false, detail: (result.stderr || result.stdout || result.error?.message || "COM 探测失败").trim() };
+}
+
 const checks = [];
 const nodeMajor = Number.parseInt(process.versions.node.split(".")[0], 10);
 checks.push({
@@ -43,6 +61,17 @@ checks.push({
   ok: nodeMajor >= 18,
   detail: process.version,
 });
+
+let rendererProbe = null;
+if (hasFlag("--probe-renderer")) {
+  rendererProbe = probePowerPointCom();
+  checks.push({
+    name: "PowerPoint COM 实际探测",
+    required: false,
+    ok: rendererProbe.ok,
+    detail: rendererProbe.detail,
+  });
+}
 
 let runtime = null;
 try {
@@ -96,6 +125,7 @@ const result = {
   platform: `${os.platform()} ${os.release()} (${os.arch()})`,
   scriptsDir,
   skillDir,
+  rendererProbe,
   checks,
 };
 

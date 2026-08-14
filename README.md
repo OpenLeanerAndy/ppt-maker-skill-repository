@@ -8,7 +8,9 @@
 - 按预设的内容分析、布局和视觉规范制作 PPT。
 - 支持标题页、目录页、章节页、内容页、表格页和结束页。
 - 支持文本、项目符号、指标卡、表格、图片和原生图表。
-- 自动进行 PPTX/OOXML 结构校验。
+- 使用源内容清单核对原文、数字、表格行列和媒体，防止遗漏或改写。
+- 支持多级表头、表格容量检测和长表左右拆分，禁止删除首列或让表格越界。
+- 自动进行内容保真与 PPTX/OOXML 结构、对象边界校验。
 - 在 PowerPoint、LibreOffice 或 WPS 可用时进行页面渲染和视觉验收。
 
 ## 仓库结构
@@ -94,9 +96,14 @@ node scripts/preflight.mjs
 
 ```bash
 cd skills/ppt-maker
+node scripts/audit-deck.mjs --input scripts/example-deck.json
 node scripts/build-pptx.mjs \
   --input scripts/example-deck.json \
   --output scripts/output/example.pptx
+node scripts/render-pptx.mjs \
+  --input scripts/output/example.pptx \
+  --output scripts/output/rendered
+npm test --prefix scripts
 ```
 
 完整的输入 JSON 说明见 `skills/ppt-maker/references/PptxGenJS脚本使用说明.md`。

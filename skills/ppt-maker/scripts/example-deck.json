@@ -7,10 +7,38 @@
   "subject": "验证 ppt-maker 内置 PptxGenJS 生成能力",
   "lang": "zh-CN",
   "logo": false,
+  "sourceManifest": {
+    "sources": [],
+    "sections": [
+      {"id": "section-overview", "title": "方案概览"},
+      {"id": "section-metrics", "title": "关键指标"},
+      {"id": "section-plan", "title": "实施计划"}
+    ],
+    "textItems": [
+      {
+        "id": "text-image-fit",
+        "text": "图片会在模块区域内等比缩放，不会被拉伸变形。"
+      }
+    ],
+    "tables": [
+      {
+        "id": "table-plan",
+        "rows": 3,
+        "columns": 4,
+        "headerRows": 1
+      }
+    ],
+    "media": [
+      {
+        "id": "media-logo-example",
+        "path": "../assets/logo.png"
+      }
+    ]
+  },
   "agenda": [
-    "方案概览",
-    "关键指标",
-    "实施计划"
+    {"title": "方案概览", "sourceRef": "section-overview"},
+    {"title": "关键指标", "sourceRef": "section-metrics"},
+    {"title": "实施计划", "sourceRef": "section-plan"}
   ],
   "theme": {
     "fontFace": "Source Han Sans SC",
@@ -101,11 +129,13 @@
             {
               "type": "image",
               "path": "../assets/logo.png",
-              "altText": "ppt-maker 默认 Logo"
+              "altText": "ppt-maker 默认 Logo",
+              "sourceRef": "media-logo-example"
             },
             {
               "type": "text",
-              "text": "图片会在模块区域内等比缩放，不会被拉伸变形。"
+              "text": "图片会在模块区域内等比缩放，不会被拉伸变形。",
+              "sourceRef": "text-image-fit"
             }
           ]
         }
@@ -116,6 +146,7 @@
       "title": "实施计划",
       "summary": "下表展示独立表格页的基础样式。",
       "table": {
+        "sourceRef": "table-plan",
         "headers": ["阶段", "主要任务", "计划周期", "状态"],
         "rows": [
           ["准备", "确认大纲与素材", "第1周", "已完成"],

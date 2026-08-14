@@ -102,6 +102,28 @@ function naturalSlideNumber(name) {
   return match ? Number.parseInt(match[1], 10) : Number.MAX_SAFE_INTEGER;
 }
 
+function xmlNumber(attributes, name) {
+  const match = attributes.match(new RegExp(`\\b${name}="(-?\\d+)"`));
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+
+function slideBoundsIssues(xml, slideWidth, slideHeight) {
+  const issues = [];
+  const pattern = /<a:off\b([^>]*)\/>[\s\S]{0,320}?<a:ext\b([^>]*)\/>/g;
+  for (const match of xml.matchAll(pattern)) {
+    const x = xmlNumber(match[1], "x");
+    const y = xmlNumber(match[1], "y");
+    const width = xmlNumber(match[2], "cx");
+    const height = xmlNumber(match[2], "cy");
+    if ([x, y, width, height].some((value) => value === null)) continue;
+    const tolerance = 1000;
+    if (x < -tolerance || y < -tolerance || x + width > slideWidth + tolerance || y + height > slideHeight + tolerance) {
+      issues.push({ x, y, width, height });
+    }
+  }
+  return issues;
+}
+
 export function validatePptx(filePath, options = {}) {
   const absolutePath = path.resolve(filePath);
   const errors = [];
@@ -149,6 +171,34 @@ export function validatePptx(filePath, options = {}) {
     errors.push(`页数不符：预期 ${options.expectedSlides} 页，实际 ${slides.length} 页。`);
   }
 
+  let slideWidth = null;
+  let slideHeight = null;
+  let tableCount = 0;
+  const slideTableCounts = [];
+  try {
+    const presentationEntry = entryMap.get("ppt/presentation.xml");
+    if (presentationEntry) {
+      const xml = readEntry(buffer, presentationEntry).toString("utf8");
+      const size = xml.match(/<p:sldSz\b([^>]*)\/>/);
+      if (size) {
+        slideWidth = xmlNumber(size[1], "cx");
+        slideHeight = xmlNumber(size[1], "cy");
+      }
+    }
+    if (slideWidth && slideHeight) {
+      for (const slide of slides) {
+        const xml = readEntry(buffer, slide).toString("utf8");
+        const tablesOnSlide = [...xml.matchAll(/<a:tbl>/g)].length;
+        tableCount += tablesOnSlide;
+        slideTableCounts.push({ slide: naturalSlideNumber(slide.name), tables: tablesOnSlide });
+        const bounds = slideBoundsIssues(xml, slideWidth, slideHeight);
+        if (bounds.length > 0) errors.push(`${slide.name} 有 ${bounds.length} 个对象超出页面边界。`);
+      }
+    } else warnings.push("无法读取幻灯片尺寸，未执行对象边界检查。 ");
+  } catch (error) {
+    errors.push(`对象边界检查失败：${error.message}`);
+  }
+
   try {
     const presentationEntry = entryMap.get("ppt/presentation.xml");
     const relationshipsEntry = entryMap.get("ppt/_rels/presentation.xml.rels");
@@ -181,6 +231,13 @@ export function validatePptx(filePath, options = {}) {
 
   const media = entries.filter((entry) => entry.name.startsWith("ppt/media/") && !entry.name.endsWith("/"));
   const charts = entries.filter((entry) => /^ppt\/charts\/chart\d+\.xml$/.test(entry.name));
+  const duplicateMedia = new Map();
+  for (const entry of media) {
+    const key = `${entry.crc32}:${entry.uncompressedSize}`;
+    duplicateMedia.set(key, [...(duplicateMedia.get(key) ?? []), entry.name]);
+  }
+  const duplicateMediaGroups = [...duplicateMedia.values()].filter((group) => group.length > 1);
+  if (duplicateMediaGroups.length > 0) warnings.push(`发现 ${duplicateMediaGroups.length} 组重复媒体资源，可考虑通过幻灯片母版复用。`);
   const result = {
     ok: errors.length === 0,
     file: absolutePath,
@@ -188,7 +245,10 @@ export function validatePptx(filePath, options = {}) {
     entries: entries.length,
     slides: slides.length,
     media: media.length,
+    duplicateMediaGroups: duplicateMediaGroups.length,
     charts: charts.length,
+    tables: tableCount,
+    slideTableCounts,
     errors,
     warnings,
   };

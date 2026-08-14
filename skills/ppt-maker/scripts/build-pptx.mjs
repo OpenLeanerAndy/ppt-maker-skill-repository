@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { auditDeckSpec, tableModel } from "./lib/deck-audit.mjs";
 import { loadPptxGenJS, skillDir } from "./lib/pptxgen-loader.mjs";
 import { validatePptx } from "./validate-pptx.mjs";
 
@@ -11,6 +12,9 @@ const SLIDE_W = 13.333;
 const SLIDE_H = 7.5;
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
 const ALLOWED_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif"]);
+const BODY_FONT_SIZE = 10;
+const BODY_LINE_SPACING = 1.3;
+const MIN_BODY_ROW_HEIGHT = 0.24;
 const DEFAULT_THEME = {
   fontFace: "Source Han Sans SC",
   colors: {
@@ -126,7 +130,7 @@ function containRect(dimensions, x, y, w, h) {
   return { x: x + (w - fittedW) / 2, y, w: fittedW, h };
 }
 
-function addImageContained(slide, filePath, box, altText = "") {
+function validatedImageOptions(filePath, box, altText = "") {
   requireLocalAsset(filePath, "图片");
   const extension = path.extname(filePath).toLowerCase();
   if (!ALLOWED_IMAGE_EXTENSIONS.has(extension)) {
@@ -146,15 +150,32 @@ function addImageContained(slide, filePath, box, altText = "") {
     throw new Error(`图片文件签名与扩展名不匹配：${filePath}`);
   }
   const fitted = containRect(dimensions, box.x, box.y, box.w, box.h);
-  slide.addImage({ path: filePath, ...fitted, altText });
+  return { path: filePath, ...fitted, altText };
+}
+
+function addImageContained(slide, filePath, box, altText = "") {
+  slide.addImage(validatedImageOptions(filePath, box, altText));
 }
 
 function addLogo(slide, context, mode = "content") {
-  if (!context.logo) return;
+  if (!context.logo || context.logoOnMaster) return;
   const box = mode === "title"
     ? { x: 9.9, y: 0.45, w: 2.75, h: 0.9 }
     : { x: 11.25, y: 0.18, w: 1.55, h: 0.52 };
   addImageContained(slide, context.logo, box, "Logo");
+}
+
+function defineLogoMasters(context) {
+  const base = { background: { color: context.theme.colors.white }, margin: 0 };
+  const contentObjects = context.logo
+    ? [{ image: validatedImageOptions(context.logo, { x: 11.25, y: 0.18, w: 1.55, h: 0.52 }, "Logo") }]
+    : [];
+  const titleObjects = context.logo
+    ? [{ image: validatedImageOptions(context.logo, { x: 9.9, y: 0.45, w: 2.75, h: 0.9 }, "Logo") }]
+    : [];
+  context.pptx.defineSlideMaster({ ...base, title: "PPT_MAKER_CONTENT", objects: contentObjects });
+  context.pptx.defineSlideMaster({ ...base, title: "PPT_MAKER_TITLE", objects: titleObjects });
+  context.logoOnMaster = Boolean(context.logo);
 }
 
 function addPageNumber(slide, context, pageNumber) {
@@ -173,6 +194,7 @@ function addPageNumber(slide, context, pageNumber) {
 
 function addHeader(slide, context, title, pageNumber) {
   const { colors, fontFace } = context.theme;
+  assertTextFits(title, { w: 10.35, h: 0.48 }, "页面标题", 24, 0);
   slide.addText(title, {
     x: 0.6,
     y: 0.28,
@@ -183,7 +205,6 @@ function addHeader(slide, context, title, pageNumber) {
     fontSize: 24,
     bold: true,
     color: colors.text,
-    fit: "shrink",
     valign: "middle",
   });
   slide.addShape(context.pptx.ShapeType.line, {
@@ -299,6 +320,41 @@ function blockWeight(block) {
   return Math.max(1, String(block.text ?? "").length / 120);
 }
 
+function displayUnits(value) {
+  let units = 0;
+  for (const character of String(value ?? "")) {
+    if (character === "\n") continue;
+    if (/\s/.test(character)) units += 0.35;
+    else if (character.codePointAt(0) > 0xff) units += 1;
+    else if (/[A-Z0-9]/.test(character)) units += 0.62;
+    else units += 0.52;
+  }
+  return units;
+}
+
+function estimatedWrappedLines(value, width, fontSize = BODY_FONT_SIZE) {
+  const glyphWidth = (fontSize / 72) * 0.92;
+  const capacity = Math.max(1, (width - 0.12) / glyphWidth);
+  return String(value ?? "").split(/\r?\n/).reduce(
+    (sum, paragraph) => sum + Math.max(1, Math.ceil(displayUnits(paragraph) / capacity)),
+    0,
+  );
+}
+
+function estimatedTextHeight(value, width, fontSize = BODY_FONT_SIZE, margin = 0.06) {
+  const lineHeight = (fontSize / 72) * BODY_LINE_SPACING;
+  return estimatedWrappedLines(value, width - margin * 2, fontSize) * lineHeight + margin * 2 + 0.04;
+}
+
+function assertTextFits(value, box, label, fontSize = BODY_FONT_SIZE, margin = 0.06) {
+  const required = estimatedTextHeight(value, box.w, fontSize, margin);
+  if (required > box.h + 0.02) {
+    throw new Error(
+      `${label}预计需要 ${required.toFixed(2)} 英寸高度，但区域只有 ${box.h.toFixed(2)} 英寸；请增加区域、拆分模块或分页，不得缩小字号或让文字越界。`,
+    );
+  }
+}
+
 function layoutBlocks(blocks, box) {
   const gap = 0.1;
   const available = box.h - gap * Math.max(0, blocks.length - 1);
@@ -316,16 +372,22 @@ function layoutBlocks(blocks, box) {
 }
 
 function addTextBlock(slide, context, block, box) {
+  const value = String(block.text ?? "");
+  assertTextFits(value, box, "正文文本");
   slide.addText(String(block.text ?? ""), {
     x: box.x, y: box.y, w: box.w, h: box.h,
     margin: 0.06, fontFace: context.theme.fontFace,
-    fontSize: 10, color: context.theme.colors.text,
-    valign: "top", fit: "shrink", breakLine: false,
+    fontSize: BODY_FONT_SIZE, color: context.theme.colors.text,
+    valign: "top", breakLine: false,
     paraSpaceAfterPt: 3,
   });
 }
 
 function addBulletsBlock(slide, context, block, box) {
+  const plainText = (block.items ?? [])
+    .map((item) => (typeof item === "string" ? item : item?.text ?? ""))
+    .join("\n");
+  assertTextFits(plainText, box, "项目符号文本");
   const items = (block.items ?? []).map((item, index, array) => ({
     text: typeof item === "string" ? item : item.text,
     options: {
@@ -341,8 +403,8 @@ function addBulletsBlock(slide, context, block, box) {
   slide.addText(items, {
     x: box.x, y: box.y, w: box.w, h: box.h,
     margin: 0.06, fontFace: context.theme.fontFace,
-    fontSize: 10, color: context.theme.colors.text,
-    valign: "top", fit: "shrink",
+    fontSize: BODY_FONT_SIZE, color: context.theme.colors.text,
+    valign: "top",
   });
 }
 
@@ -376,48 +438,157 @@ function numericValue(value) {
   return typeof value === "number" || /^[-+]?\d[\d,.]*(%|万|亿|元)?$/.test(String(value).trim());
 }
 
-function addTableBlock(slide, context, block, box) {
-  const headers = block.headers ?? [];
-  const rows = block.rows ?? [];
-  if (headers.length === 0) throw new Error("表格必须包含 headers。 ");
-  if (rows.some((row) => row.length !== headers.length)) {
-    throw new Error("表格每一行的单元格数量必须与 headers 一致。 ");
-  }
-  const data = [
-    headers.map((value) => ({
-      text: String(value),
-      options: {
+function tableCellText(cell) {
+  return cell && typeof cell === "object" && !Array.isArray(cell)
+    ? String(cell.text ?? "")
+    : String(cell ?? "");
+}
+
+function tableCellSpan(cell) {
+  if (!cell || typeof cell !== "object" || Array.isArray(cell)) return 1;
+  const span = Number(cell.colspan ?? cell.options?.colspan ?? 1);
+  return Number.isInteger(span) && span > 0 ? span : 1;
+}
+
+function styleTableCell(cell, context, { header, rowIndex }) {
+  const value = tableCellText(cell);
+  const provided = cell && typeof cell === "object" && !Array.isArray(cell) ? cell : {};
+  const options = {
+    ...(header
+      ? {
         bold: true,
         color: context.theme.colors.white,
         fill: { color: context.theme.colors.tableHeader },
         align: "center",
-      },
-    })),
-    ...rows.map((row, rowIndex) => row.map((value) => ({
-      text: String(value ?? ""),
-      options: {
+      }
+      : {
         color: context.theme.colors.text,
         fill: { color: rowIndex % 2 === 0 ? context.theme.colors.pale : "F5F7FB" },
         align: numericValue(value) ? "right" : "left",
-      },
-    }))),
+      }),
+    ...(provided.options ?? {}),
+  };
+  for (const key of ["colspan", "rowspan"]) {
+    const raw = provided[key] ?? provided.options?.[key];
+    if (Number.isInteger(Number(raw)) && Number(raw) > 1) options[key] = Number(raw);
+  }
+  return { text: value, options };
+}
+
+function normalizeColumnWidths(block, columnCount, width) {
+  if (block.colWidths !== undefined && (!Array.isArray(block.colWidths) || block.colWidths.length !== columnCount)) {
+    throw new Error(`表格 colWidths 必须包含 ${columnCount} 个宽度值，不得通过少给一列来隐藏字段。`);
+  }
+  const raw = block.colWidths?.map(Number) ?? Array(columnCount).fill(1);
+  if (raw.some((value) => !Number.isFinite(value) || value <= 0)) throw new Error("表格 colWidths 必须全部为正数。 ");
+  const total = raw.reduce((sum, value) => sum + value, 0);
+  return raw.map((value) => (value / total) * width);
+}
+
+function estimateTableRowHeight(row, widths, { header = false } = {}) {
+  let column = 0;
+  let lines = 1;
+  for (const cell of row) {
+    const span = tableCellSpan(cell);
+    const cellWidth = widths.slice(column, column + span).reduce((sum, value) => sum + value, 0);
+    lines = Math.max(lines, estimatedWrappedLines(tableCellText(cell), Math.max(0.2, cellWidth - 0.07), BODY_FONT_SIZE));
+    column += span;
+  }
+  const lineHeight = (BODY_FONT_SIZE / 72) * BODY_LINE_SPACING;
+  return Math.max(header ? 0.31 : MIN_BODY_ROW_HEIGHT, lines * lineHeight + 0.10);
+}
+
+function renderTable(slide, context, headerRows, bodyRows, box, widths) {
+  const data = [
+    ...headerRows.map((row) => row.map((cell) => styleTableCell(cell, context, { header: true, rowIndex: 0 }))),
+    ...bodyRows.map((row, rowIndex) => row.map((cell) => styleTableCell(cell, context, { header: false, rowIndex }))),
   ];
-  const widths = block.colWidths?.length === headers.length
-    ? block.colWidths.map(Number)
-    : Array(headers.length).fill(box.w / headers.length);
-  const widthTotal = widths.reduce((sum, value) => sum + value, 0);
-  const normalizedWidths = widths.map((value) => (value / widthTotal) * box.w);
+  const rowHeights = [
+    ...headerRows.map((row) => estimateTableRowHeight(row, widths, { header: true })),
+    ...bodyRows.map((row) => estimateTableRowHeight(row, widths)),
+  ];
+  const height = rowHeights.reduce((sum, value) => sum + value, 0);
+  if (height > box.h + 0.02) throw new Error("内部错误：表格分段后仍超过目标区域。 ");
   slide.addTable(data, {
-    x: box.x, y: box.y, w: box.w, h: box.h,
-    colW: normalizedWidths,
-    rowH: box.h / data.length,
+    x: box.x, y: box.y, w: box.w, h: height,
+    colW: widths,
+    rowH: rowHeights,
     margin: 0.035,
     fontFace: context.theme.fontFace,
-    fontSize: 10,
+    fontSize: BODY_FONT_SIZE,
     border: { type: "solid", color: context.theme.colors.white, pt: 0.5 },
     autoFit: false,
+    autoPage: false,
     valign: "middle",
   });
+}
+
+function splitRowsByHeight(rows, widths, headerRows, height) {
+  const headerHeight = headerRows.reduce((sum, row) => sum + estimateTableRowHeight(row, widths, { header: true }), 0);
+  if (headerHeight >= height) throw new Error("表格多级表头本身已超过目标区域高度。 ");
+  const capacity = height - headerHeight;
+  const rowHeights = rows.map((row) => estimateTableRowHeight(row, widths));
+  for (const rowHeight of rowHeights) {
+    if (headerHeight + rowHeight > height) {
+      throw new Error("表格存在单行内容过长，无法在10号字下完整显示；请加宽长文本列或把该记录改为独立页面。 ");
+    }
+  }
+  const total = rowHeights.reduce((sum, value) => sum + value, 0);
+  if (total > capacity * 2 + 0.02) return { segments: null, required: Math.ceil(total / capacity) };
+  let leftHeight = 0;
+  let best = null;
+  for (let index = 1; index < rows.length; index += 1) {
+    leftHeight += rowHeights[index - 1];
+    const rightHeight = total - leftHeight;
+    if (leftHeight <= capacity + 0.02 && rightHeight <= capacity + 0.02) {
+      const difference = Math.abs(leftHeight - rightHeight);
+      if (!best || difference < best.difference) best = { index, difference };
+    }
+  }
+  if (!best) return { segments: null, required: 3 };
+  return { segments: [rows.slice(0, best.index), rows.slice(best.index)], required: 2 };
+}
+
+function addTableBlock(slide, context, block, box) {
+  const headerRows = tableModel.tableHeaderRows(block);
+  const rows = Array.isArray(block.rows) ? block.rows : [];
+  if (headerRows.length === 0) throw new Error("表格必须包含 headers 或 headerRows。 ");
+  if (headerRows.length > 3) throw new Error("表格最多支持3行多级表头；请先核对源表结构。 ");
+  const columnCount = tableModel.tableColumns(block);
+  if (columnCount === 0) throw new Error("表格没有可识别的列。 ");
+  for (const [index, row] of rows.entries()) {
+    if (tableModel.logicalColumns(row) !== columnCount) {
+      throw new Error(`表格正文第 ${index + 1} 行为 ${tableModel.logicalColumns(row)} 列，表格应为 ${columnCount} 列；不得删除最左列或其他字段。`);
+    }
+  }
+
+  const widths = normalizeColumnWidths(block, columnCount, box.w);
+  const totalHeight = [...headerRows.map((row) => estimateTableRowHeight(row, widths, { header: true })), ...rows.map((row) => estimateTableRowHeight(row, widths))]
+    .reduce((sum, value) => sum + value, 0);
+  if (totalHeight <= box.h + 0.02) {
+    renderTable(slide, context, headerRows, rows, box, widths);
+    return;
+  }
+
+  const splitMode = String(block.splitMode ?? "auto").toLowerCase();
+  if (!["auto", "columns", "none"].includes(splitMode)) throw new Error(`不支持的表格 splitMode：${splitMode}`);
+  if (splitMode === "none") {
+    throw new Error(`表格预计需要 ${totalHeight.toFixed(2)} 英寸高度，但区域只有 ${box.h.toFixed(2)} 英寸；必须拆分，不得越过模块或页面边界。`);
+  }
+  if (columnCount > Number(block.maxColumnsForSideSplit ?? 6) || box.w < 8) {
+    throw new Error(`表格有 ${columnCount} 列且纵向超高，不适合左右并排；请在大纲阶段拆成连续页面，每页保留全部列和重复表头。`);
+  }
+
+  const gap = Number.isFinite(block.splitGap) ? block.splitGap : 0.16;
+  const segmentWidth = (box.w - gap) / 2;
+  const segmentWidths = normalizeColumnWidths(block, columnCount, segmentWidth);
+  const split = splitRowsByHeight(rows, segmentWidths, headerRows, box.h);
+  if (!split.segments) {
+    throw new Error(`表格在10号字下至少需要 ${split.required} 个纵向分段；当前页面只允许左右两个表格，请拆成连续页面。`);
+  }
+  const segments = split.segments;
+  renderTable(slide, context, headerRows, segments[0], { ...box, w: segmentWidth }, segmentWidths);
+  renderTable(slide, context, headerRows, segments[1], { ...box, x: box.x + segmentWidth + gap, w: segmentWidth }, segmentWidths);
 }
 
 function addChartBlock(slide, context, block, box) {
@@ -476,6 +647,7 @@ function renderBlock(slide, context, placement) {
 function addModule(slide, context, module, box) {
   const { colors, fontFace } = context.theme;
   const titleH = 0.38;
+  assertTextFits(module.title || "", { w: box.w - 0.1, h: titleH - 0.06 }, "模块标题", 14, 0);
   slide.addShape(context.pptx.ShapeType.rect, {
     x: box.x, y: box.y, w: box.w, h: titleH,
     fill: { color: normalizeColor(module.titleColor, colors.primary) },
@@ -484,7 +656,7 @@ function addModule(slide, context, module, box) {
   slide.addText(module.title || "", {
     x: box.x + 0.05, y: box.y + 0.03, w: box.w - 0.1, h: titleH - 0.06,
     margin: 0, fontFace, fontSize: 14, bold: true,
-    color: colors.white, align: "center", valign: "middle", fit: "shrink",
+    color: colors.white, align: "center", valign: "middle",
   });
   slide.addShape(context.pptx.ShapeType.rect, {
     x: box.x, y: box.y + titleH, w: box.w, h: box.h - titleH,
@@ -505,8 +677,50 @@ function gridColumns(count, requested) {
   if (Number.isInteger(requested) && requested >= 1 && requested <= 4) return requested;
   if (count <= 1) return 1;
   if (count <= 3) return count;
+  if (count === 4) return 2;
   if (count <= 6) return 3;
   return 4;
+}
+
+function normalizedSegments(weights, start, length, gap) {
+  if (weights.some((value) => !Number.isFinite(value) || value <= 0)) throw new Error("布局权重必须全部为正数。 ");
+  const available = length - gap * Math.max(0, weights.length - 1);
+  const total = weights.reduce((sum, value) => sum + value, 0);
+  let cursor = start;
+  return weights.map((weight) => {
+    const size = available * (weight / total);
+    const segment = { start: cursor, size };
+    cursor += size + gap;
+    return segment;
+  });
+}
+
+function moduleContentWeight(module) {
+  return Math.max(1, normalizeBlocks(module).reduce((sum, block) => sum + blockWeight(block), 0));
+}
+
+function explicitModuleLayout(modules, area) {
+  if (!modules.some((module) => module.layout)) return null;
+  if (!modules.every((module) => module.layout)) throw new Error("使用 module.layout 时，每个模块都必须提供归一化 x、y、w、h。 ");
+  const boxes = modules.map((module, index) => {
+    const layout = module.layout;
+    for (const key of ["x", "y", "w", "h"]) {
+      if (!Number.isFinite(layout[key])) throw new Error(`第 ${index + 1} 个模块的 layout.${key} 必须是数字。`);
+    }
+    if (layout.x < 0 || layout.y < 0 || layout.w <= 0 || layout.h <= 0 || layout.x + layout.w > 1 || layout.y + layout.h > 1) {
+      throw new Error(`第 ${index + 1} 个模块的 layout 必须完整位于 0–1 的内容区域内。`);
+    }
+    return { x: area.x + layout.x * area.w, y: area.y + layout.y * area.h, w: layout.w * area.w, h: layout.h * area.h };
+  });
+  for (let left = 0; left < boxes.length; left += 1) {
+    for (let right = left + 1; right < boxes.length; right += 1) {
+      const a = boxes[left];
+      const b = boxes[right];
+      const overlap = a.x < b.x + b.w - 0.01 && a.x + a.w > b.x + 0.01 && a.y < b.y + b.h - 0.01 && a.y + a.h > b.y + 0.01;
+      if (overlap) throw new Error(`第 ${left + 1} 与第 ${right + 1} 个模块的显式布局发生重叠。`);
+    }
+  }
+  return boxes;
 }
 
 function addContentSlide(slide, context, spec, pageNumber) {
@@ -518,10 +732,11 @@ function addContentSlide(slide, context, spec, pageNumber) {
       fill: { color: context.theme.colors.white },
       line: { color: context.theme.colors.secondary, width: 0.8 },
     });
+    assertTextFits(spec.summary, { w: 11.75, h: 0.4 }, "页面总述", 14, 0);
     slide.addText(spec.summary, {
       x: 0.78, y: 1.25, w: 11.75, h: 0.4,
       margin: 0, fontFace: context.theme.fontFace, fontSize: 14, bold: true,
-      color: context.theme.colors.text, valign: "middle", fit: "shrink",
+      color: context.theme.colors.text, valign: "middle",
     });
   }
   const modules = spec.modules ?? [];
@@ -529,18 +744,32 @@ function addContentSlide(slide, context, spec, pageNumber) {
   if (modules.length > 8) throw new Error(`内容页“${spec.title}”最多支持 8 个模块。`);
   const area = { x: 0.6, y: hasSummary ? 1.98 : 1.15, w: 12.1, h: hasSummary ? 4.85 : 5.68 };
   const gap = Number.isFinite(spec.gap) ? spec.gap : 0.16;
+  const explicitBoxes = explicitModuleLayout(modules, area);
+  if (explicitBoxes) {
+    modules.forEach((module, index) => addModule(slide, context, module, explicitBoxes[index]));
+    return;
+  }
   const columns = gridColumns(modules.length, spec.columns);
   const rows = Math.ceil(modules.length / columns);
-  const cellW = (area.w - gap * (columns - 1)) / columns;
-  const cellH = (area.h - gap * (rows - 1)) / rows;
+  const weights = modules.map(moduleContentWeight);
+  const columnWeights = Array.isArray(spec.columnWeights)
+    ? spec.columnWeights.map(Number)
+    : Array.from({ length: columns }, (_, column) => Math.max(...weights.filter((_, index) => index % columns === column), 1));
+  const rowWeights = Array.isArray(spec.rowWeights)
+    ? spec.rowWeights.map(Number)
+    : Array.from({ length: rows }, (_, row) => Math.max(...weights.slice(row * columns, (row + 1) * columns), 1));
+  if (columnWeights.length !== columns) throw new Error(`columnWeights 必须包含 ${columns} 个值。`);
+  if (rowWeights.length !== rows) throw new Error(`rowWeights 必须包含 ${rows} 个值。`);
+  const columnSegments = normalizedSegments(columnWeights, area.x, area.w, gap);
+  const rowSegments = normalizedSegments(rowWeights, area.y, area.h, gap);
   modules.forEach((module, index) => {
     const row = Math.floor(index / columns);
     const column = index % columns;
     addModule(slide, context, module, {
-      x: area.x + column * (cellW + gap),
-      y: area.y + row * (cellH + gap),
-      w: cellW,
-      h: cellH,
+      x: columnSegments[column].start,
+      y: rowSegments[row].start,
+      w: columnSegments[column].size,
+      h: rowSegments[row].size,
     });
   });
 }
@@ -548,15 +777,86 @@ function addContentSlide(slide, context, spec, pageNumber) {
 function addTableSlide(slide, context, spec, pageNumber) {
   addHeader(slide, context, spec.title || "表格", pageNumber);
   if (spec.summary) {
+    assertTextFits(spec.summary, { w: 12.1, h: 0.48 }, "表格页总述", 14, 0);
     slide.addText(spec.summary, {
       x: 0.6, y: 1.12, w: 12.1, h: 0.48,
       margin: 0, fontFace: context.theme.fontFace, fontSize: 14, bold: true,
-      color: context.theme.colors.text, fit: "shrink",
+      color: context.theme.colors.text,
     });
   }
   addTableBlock(slide, context, spec.table ?? spec, {
     x: 0.6, y: spec.summary ? 1.72 : 1.2, w: 12.1, h: spec.summary ? 5.15 : 5.67,
   });
+}
+
+function paginateTableRows(block, box) {
+  const headerRows = tableModel.tableHeaderRows(block);
+  const columnCount = tableModel.tableColumns(block);
+  const widths = normalizeColumnWidths(block, columnCount, box.w);
+  const headerHeight = headerRows.reduce((sum, row) => sum + estimateTableRowHeight(row, widths, { header: true }), 0);
+  if (headerHeight >= box.h) throw new Error("表格表头超过独立表格页的可用高度。 ");
+  const chunks = [];
+  let current = [];
+  let used = headerHeight;
+  for (const row of block.rows ?? []) {
+    const rowHeight = estimateTableRowHeight(row, widths);
+    if (headerHeight + rowHeight > box.h) {
+      throw new Error("表格存在单行内容过长，无法在独立表格页以10号字完整显示；请加宽长文本列或把该记录改为独立内容页。 ");
+    }
+    if (current.length > 0 && used + rowHeight > box.h) {
+      chunks.push(current);
+      current = [];
+      used = headerHeight;
+    }
+    current.push(row);
+    used += rowHeight;
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
+function expandOversizedTableSlides(slides) {
+  const expanded = [];
+  for (const spec of slides) {
+    const type = String(spec.type ?? "content").toLowerCase();
+    if (type !== "table") {
+      expanded.push(spec);
+      continue;
+    }
+    const block = spec.table ?? spec;
+    const box = { x: 0.6, y: spec.summary ? 1.72 : 1.2, w: 12.1, h: spec.summary ? 5.15 : 5.67 };
+    const headerRows = tableModel.tableHeaderRows(block);
+    const columnCount = tableModel.tableColumns(block);
+    const widths = normalizeColumnWidths(block, columnCount, box.w);
+    const totalHeight = [...headerRows.map((row) => estimateTableRowHeight(row, widths, { header: true })), ...(block.rows ?? []).map((row) => estimateTableRowHeight(row, widths))]
+      .reduce((sum, value) => sum + value, 0);
+    if (totalHeight <= box.h + 0.02 || String(block.splitMode ?? "auto").toLowerCase() !== "auto") {
+      expanded.push(spec);
+      continue;
+    }
+
+    let canUseTwoColumns = false;
+    if (columnCount <= Number(block.maxColumnsForSideSplit ?? 6)) {
+      const gap = Number.isFinite(block.splitGap) ? block.splitGap : 0.16;
+      const segmentWidth = (box.w - gap) / 2;
+      const segmentWidths = normalizeColumnWidths(block, columnCount, segmentWidth);
+      canUseTwoColumns = Boolean(splitRowsByHeight(block.rows ?? [], segmentWidths, headerRows, box.h).segments);
+    }
+    if (canUseTwoColumns) {
+      expanded.push(spec);
+      continue;
+    }
+
+    const chunks = paginateTableRows(block, box);
+    chunks.forEach((rows, index) => {
+      expanded.push({
+        ...spec,
+        title: index === 0 ? spec.title : `${spec.title || "表格"}（续${index}）`,
+        table: { ...block, rows, splitMode: "none" },
+      });
+    });
+  }
+  return expanded;
 }
 
 function addClosingSlide(slide, context, spec) {
@@ -580,6 +880,9 @@ function validateDeckSpec(deck) {
   if (!deck || typeof deck !== "object" || Array.isArray(deck)) throw new Error("输入 JSON 必须是对象。 ");
   if (!deck.title || typeof deck.title !== "string") throw new Error("输入 JSON 必须包含字符串 title。 ");
   if (!Array.isArray(deck.slides) || deck.slides.length === 0) throw new Error("输入 JSON 必须包含非空 slides 数组。 ");
+  if (!deck.sourceManifest || typeof deck.sourceManifest !== "object" || Array.isArray(deck.sourceManifest)) {
+    throw new Error("输入 JSON 必须包含 sourceManifest，用于核对源文字、表格列和媒体素材。 ");
+  }
 }
 
 export async function buildPptx({ inputPath, outputPath, validate = true }) {
@@ -588,6 +891,10 @@ export async function buildPptx({ inputPath, outputPath, validate = true }) {
   const deck = JSON.parse(fs.readFileSync(absoluteInput, "utf8"));
   validateDeckSpec(deck);
   const inputDir = path.dirname(absoluteInput);
+  const audit = auditDeckSpec(deck, { inputDir });
+  if (!audit.ok) {
+    throw new Error(`内容保真审计失败：${audit.errors.join("；")}`);
+  }
   const runtime = loadPptxGenJS();
   const pptx = new runtime.PptxGenJS();
   pptx.layout = "LAYOUT_WIDE";
@@ -613,12 +920,15 @@ export async function buildPptx({ inputPath, outputPath, validate = true }) {
     logo: logoValue ? resolveAsset(logoValue, inputDir) : null,
   };
   if (context.logo) requireLocalAsset(context.logo, "Logo");
+  defineLogoMasters(context);
 
-  deck.slides.forEach((spec, index) => {
+  const slideSpecs = expandOversizedTableSlides(deck.slides);
+  slideSpecs.forEach((spec, index) => {
     const pageNumber = index + 1;
-    const slide = pptx.addSlide();
-    slide.background = { color: context.theme.colors.white };
     const type = String(spec.type ?? "content").toLowerCase();
+    const masterName = ["title", "closing"].includes(type) ? "PPT_MAKER_TITLE" : "PPT_MAKER_CONTENT";
+    const slide = pptx.addSlide(masterName);
+    slide.background = { color: context.theme.colors.white };
     if (type === "title") addTitleSlide(slide, context, spec);
     else if (type === "agenda") addAgendaSlide(slide, context, spec, pageNumber, false);
     else if (type === "section") addAgendaSlide(slide, context, spec, pageNumber, true);
@@ -634,7 +944,7 @@ export async function buildPptx({ inputPath, outputPath, validate = true }) {
   fs.mkdirSync(path.dirname(absoluteOutput), { recursive: true });
   await pptx.writeFile({ fileName: absoluteOutput, compression: true });
 
-  const validation = validate ? validatePptx(absoluteOutput, { expectedSlides: deck.slides.length }) : null;
+  const validation = validate ? validatePptx(absoluteOutput, { expectedSlides: slideSpecs.length }) : null;
   if (validation && !validation.ok) {
     throw new Error(`PPTX 已生成但结构校验失败：${validation.errors.join("；")}`);
   }
@@ -642,8 +952,9 @@ export async function buildPptx({ inputPath, outputPath, validate = true }) {
     ok: true,
     input: absoluteInput,
     output: absoluteOutput,
-    slides: deck.slides.length,
+    slides: slideSpecs.length,
     pptxgenjs: runtime.version,
+    audit,
     validation,
   };
 }
@@ -662,6 +973,7 @@ if (isMain) {
     else {
       console.log(`PPTX 生成完成：${result.output}`);
       console.log(`页面：${result.slides}；PptxGenJS：${result.pptxgenjs}`);
+      console.log(`内容保真审计：通过；必需条目 ${result.audit.stats.requiredItems} 项`);
       if (result.validation) console.log("结构校验：通过");
     }
   } catch (error) {

@@ -10,8 +10,11 @@
   },
   "scripts": {
     "preflight": "node preflight.mjs",
+    "audit": "node audit-deck.mjs --input example-deck.json",
     "build": "node build-pptx.mjs",
     "validate": "node validate-pptx.mjs",
+    "render": "node render-pptx.mjs",
+    "test": "node test-runtime.mjs",
     "smoke": "node build-pptx.mjs --input example-deck.json --output output/example.pptx"
   },
   "dependencies": {

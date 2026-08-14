@@ -26,16 +26,36 @@ npm ci --prefix scripts --ignore-scripts
 node scripts/preflight.mjs
 ```
 
-2. 复制 `scripts/example-deck.json`，按照已确认的大纲填充内容，然后生成 PPTX：
+需要确认Windows上的PowerPoint COM确实可调用时，在获得运行外部应用所需许可后执行：
+
+```bash
+node scripts/preflight.mjs --probe-renderer
+```
+
+2. 复制 `scripts/example-deck.json`，按照已确认的大纲和`sourceManifest`填充内容。禁止把正文拼接进临时Python/JavaScript源码；必须直接编辑或序列化UTF-8 JSON。
+
+3. 生成前执行内容保真审计：
+
+```bash
+node scripts/audit-deck.mjs --input scripts/example-deck.json
+```
+
+4. 审计通过后生成 PPTX：
 
 ```bash
 node scripts/build-pptx.mjs --input scripts/example-deck.json --output output/example.pptx
 ```
 
-3. 单独执行结构校验：
+5. 单独执行结构校验：
 
 ```bash
 node scripts/validate-pptx.mjs output/example.pptx --expected-slides 7
+```
+
+6. 将全部页面渲染为PNG；输出目录必须为空：
+
+```bash
+node scripts/render-pptx.mjs --input output/example.pptx --output output/rendered
 ```
 
 上述脚本均支持 `--json`，用于让 Agent 获取结构化执行结果。`build-pptx.mjs` 默认会自动运行结构校验；只有诊断场景才应使用 `--no-validate`。
@@ -46,6 +66,7 @@ node scripts/validate-pptx.mjs output/example.pptx --expected-slides 7
 |---|---:|---|
 | `title` | 是 | 演示文稿总标题，也是未指定输出路径时的默认文件名。 |
 | `slides` | 是 | 非空页面数组，按数组顺序生成。 |
+| `sourceManifest` | 是 | 源文件、必需文字、表格和媒体清单，用于生成前保真审计。 |
 | `department` | 否 | 标题页部门或汇报单位。 |
 | `date` | 否 | 标题页日期。 |
 | `author`、`company`、`subject` | 否 | 写入 PPTX 文档属性。 |
@@ -55,6 +76,22 @@ node scripts/validate-pptx.mjs output/example.pptx --expected-slides 7
 | `theme` | 否 | 字体和颜色覆盖项。 |
 
 相对素材路径首先相对于输入 JSON 所在目录解析，其次相对于 Skill 根目录解析。脚本拒绝远程图片 URL；若需要网络图片，应先在获得许可后下载到本地，再写入 JSON。
+
+## `sourceManifest`
+
+```json
+{
+  "sourceManifest": {
+    "sources": [{"id": "source-1", "path": "source.docx", "sha256": "可选"}],
+    "sections": [{"id": "section-1", "title": "一级标题原文"}],
+    "textItems": [{"id": "text-1", "text": "必须原样保留的文字"}],
+    "tables": [{"id": "table-1", "rows": 12, "columns": 6, "headerRows": 2}],
+    "media": [{"id": "image-1", "path": "extracted/image1.png"}]
+  }
+}
+```
+
+目录项、页面、模块或内容块使用`sourceRef`或`sourceRefs`引用清单条目。目录项推荐使用`{"title":"一级标题原文","sourceRef":"section-1"}`。默认条目均为必需项；经用户确认可以省略时写入非空`omittedReason`。审计会拒绝：一级标题未出现在目录、必需文字被改写、表格行列数不符、缺失最左列、必需媒体未使用、源文件不存在或SHA-256不一致。
 
 ## 页面类型
 
@@ -100,6 +137,19 @@ node scripts/validate-pptx.mjs output/example.pptx --expected-slides 7
 | `chart` | `chartType`、`series` | 支持 `bar`、`column`、`line`、`pie`、`doughnut`。 |
 | `image` | `path` | 可选 `altText`；25 MB 内的 PNG、JPEG、GIF 会校验文件签名并按原始比例适配。 |
 
+## 表格输入和拆分
+
+- 单行表头使用`headers`；多级表头使用`headerRows`。
+- 单元格可以是字符串，也可以是`{"text":"标题","rowspan":2,"colspan":1}`。
+- `colWidths`必须与逻辑列数一致。脚本会核对每个正文行的逻辑列数，禁止通过少写第一列或其他字段来适配页面。
+- 脚本按列宽、文字长度、10号字和1.3倍行距估算行高。单表超过目标区域时：
+  - `splitMode: "auto"`（默认）：列数不多且左右仍可读时自动拆成两个重复表头的左右表格；独立`table`页面中的宽表自动拆成连续页面。复杂内容模块中的宽表会报错，要求在大纲阶段改为独立表格页。
+  - `splitMode: "columns"`：要求左右双表；若两个表仍放不下则报错。
+  - `splitMode: "none"`：禁止自动拆分；只要超高即报错。
+- 脚本不会通过缩小到10号字以下、越过模块边框或删除数据来完成布局。
+
+内容页默认按模块内容量分配行列尺寸。需要精确复合布局时，可给每个模块提供归一化`layout: {"x":0,"y":0,"w":0.6,"h":1}`；所有模块必须位于0–1的内容区域内且不得重叠。
+
 图表的每个 `series` 必须使用 PptxGenJS 数据结构：
 
 ```json
@@ -112,7 +162,9 @@ node scripts/validate-pptx.mjs output/example.pptx --expected-slides 7
 
 ## 验收边界
 
-`validate-pptx.mjs` 检查 ZIP/OOXML 文件结构、必要条目、页面关系和页数，不能证明页面没有文字溢出、遮挡或视觉问题。正式交付前仍须使用 PowerPoint、LibreOffice 或 WPS 把所有页面渲染为图片，并逐页进行视觉检查。
+`audit-deck.mjs`检查源内容清单、原文、表格行列和媒体引用。`validate-pptx.mjs`检查 ZIP/OOXML 文件结构、必要条目、页面关系、页数和对象页面边界。二者都不能完全证明视觉效果正常。正式交付前仍须使用`render-pptx.mjs`或可靠的PowerPoint、LibreOffice、WPS能力把所有页面渲染为图片，并逐页进行视觉检查。
+
+如果渲染失败，只能报告“内容和结构审计通过，视觉验收未完成”。不得用OOXML检查代替视觉验收，也不得为了继续任务而后台安装`python-pptx`或其他依赖。
 
 脚本不会自动安装依赖、下载网络素材、修改系统字体或调用外部服务；这些动作都必须单独获得用户授权。
 
