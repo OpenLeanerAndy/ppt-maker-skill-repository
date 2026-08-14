@@ -37,17 +37,20 @@ function collectDeck(deck) {
   const tables = [];
   const images = [];
   const agendaTitles = [];
+  const slideStructures = [];
+  const moduleStructures = [];
 
   function addRefs(value) {
     const values = Array.isArray(value) ? value : value ? [value] : [];
     for (const ref of values) refs.add(String(ref));
   }
 
-  function visitBlock(block, location) {
+  function visitBlock(block, location, typeSet = null) {
     if (!block || typeof block !== "object") return;
     addRefs(block.sourceRef);
     addRefs(block.sourceRefs);
     const type = String(block.type ?? "text").toLowerCase();
+    if (typeSet) typeSet.add(type);
     if (type === "text") text.push(String(block.text ?? ""));
     if (type === "bullets") {
       for (const item of block.items ?? []) text.push(typeof item === "string" ? item : String(item?.text ?? ""));
@@ -55,6 +58,13 @@ function collectDeck(deck) {
     if (type === "metrics") {
       for (const item of block.items ?? []) text.push([item?.value, item?.unit, item?.label].filter(Boolean).join(""));
     }
+    if (type === "matrix") {
+      for (const item of block.items ?? []) {
+        if (typeof item === "string") text.push(item);
+        else text.push(String(item?.title ?? item?.label ?? ""), String(item?.body ?? item?.text ?? item?.description ?? ""), Array.isArray(item?.meta) ? item.meta.join("\n") : String(item?.meta ?? ""));
+      }
+    }
+    if (type === "callout") text.push(String(block.label ?? block.title ?? ""), String(block.text ?? block.body ?? ""));
     if (type === "table") {
       tables.push({ ...block, location });
       for (const row of [...tableHeaderRows(block), ...(block.rows ?? [])]) {
@@ -84,6 +94,7 @@ function collectDeck(deck) {
 
   for (const [slideIndex, slide] of (deck.slides ?? []).entries()) {
     const slideLocation = `slides[${slideIndex}]`;
+    const slideTypes = new Set();
     addRefs(slide?.sourceRef);
     addRefs(slide?.sourceRefs);
     text.push(String(slide?.title ?? ""), String(slide?.heading ?? ""), String(slide?.summary ?? ""), String(slide?.subtitle ?? ""));
@@ -100,7 +111,7 @@ function collectDeck(deck) {
     }
     if (String(slide?.type ?? "").toLowerCase() === "table" || slide?.table) {
       const table = slide.table ?? slide;
-      visitBlock({ type: "table", ...table }, `${slideLocation}.table`);
+      visitBlock({ type: "table", ...table }, `${slideLocation}.table`, slideTypes);
     }
     for (const [moduleIndex, module] of (slide?.modules ?? []).entries()) {
       const moduleLocation = `${slideLocation}.modules[${moduleIndex}]`;
@@ -113,14 +124,38 @@ function collectDeck(deck) {
           ...(module?.body ? [{ type: "text", text: module.body }] : []),
           ...(module?.bullets?.length ? [{ type: "bullets", items: module.bullets }] : []),
           ...(module?.metrics?.length ? [{ type: "metrics", items: module.metrics }] : []),
+          ...(module?.matrix ? [{ type: "matrix", ...(Array.isArray(module.matrix) ? { items: module.matrix } : module.matrix) }] : []),
+          ...(module?.callout ? [{ type: "callout", ...(typeof module.callout === "string" ? { text: module.callout } : module.callout) }] : []),
           ...(module?.table ? [{ type: "table", ...module.table }] : []),
           ...(module?.chart ? [{ type: "chart", ...module.chart }] : []),
           ...(module?.image ? [{ type: "image", ...(typeof module.image === "string" ? { path: module.image } : module.image) }] : []),
         ];
-      for (const [blockIndex, block] of blocks.entries()) visitBlock(block, `${moduleLocation}.blocks[${blockIndex}]`);
+      const moduleTypes = new Set();
+      for (const [blockIndex, block] of blocks.entries()) {
+        visitBlock(block, `${moduleLocation}.blocks[${blockIndex}]`, moduleTypes);
+        slideTypes.add(String(block?.type ?? "text").toLowerCase());
+      }
+      const bulletItems = blocks
+        .filter((block) => String(block?.type ?? "text").toLowerCase() === "bullets")
+        .flatMap((block) => block.items ?? [])
+        .map((item) => typeof item === "string" ? item : String(item?.text ?? ""));
+      moduleStructures.push({
+        location: moduleLocation,
+        title: String(module?.title ?? ""),
+        types: [...moduleTypes],
+        bulletItems,
+        plainListReason: String(module?.plainListReason ?? "").trim(),
+      });
     }
+    slideStructures.push({
+      location: slideLocation,
+      title: String(slide?.title ?? slide?.heading ?? ""),
+      type: String(slide?.type ?? "content").toLowerCase(),
+      types: [...slideTypes],
+      visualExemptionReason: String(slide?.visualExemptionReason ?? "").trim(),
+    });
   }
-  return { text: text.join("\n"), refs, tables, images, agendaTitles };
+  return { text: text.join("\n"), refs, tables, images, agendaTitles, slideStructures, moduleStructures };
 }
 
 function resolveLocal(filePath, inputDir) {
@@ -253,6 +288,28 @@ export function auditDeckSpec(deck, { inputDir = process.cwd() } = {}) {
     }
   }
 
+  const structuredTypes = new Set(["metrics", "matrix", "table", "chart", "image", "callout"]);
+  const requireStructuredEvidence = true;
+  if (requireStructuredEvidence) {
+    for (const slide of collected.slideStructures) {
+      if (slide.type !== "content") continue;
+      const hasStructuredEvidence = slide.types.some((type) => structuredTypes.has(type));
+      if (!hasStructuredEvidence && !slide.visualExemptionReason) {
+        errors.push(`${slide.location}“${slide.title}”只有正文/项目符号，没有结构化证据；请使用指标、表格、图表、图片、事项矩阵或提示块，纯叙述页则填写 visualExemptionReason。`);
+      }
+    }
+    for (const module of collected.moduleStructures) {
+      const hasStructuredEvidence = module.types.some((type) => structuredTypes.has(type));
+      if (hasStructuredEvidence || module.plainListReason) continue;
+      const labeledItems = module.bulletItems.filter((item) => /[^：:\s]{1,20}[：:]/.test(item));
+      if (module.bulletItems.length >= 3 && labeledItems.length >= 2) {
+        errors.push(`${module.location}“${module.title}”包含多项“标签：说明”，不得退化为项目符号；请使用 matrix 或 table，确为同质叙述时填写 plainListReason。`);
+      } else if (module.bulletItems.length >= 6) {
+        errors.push(`${module.location}“${module.title}”包含 ${module.bulletItems.length} 条纯文字列表；请评估 matrix、table 或分页，确为同质叙述时填写 plainListReason。`);
+      }
+    }
+  }
+
   const requiredReferenceIds = ["sections", "textItems", "tables", "media"]
     .flatMap((collection) => (manifest[collection] ?? []).filter(required).map((item) => item.id));
   const requiredSourceIds = (manifest.sources ?? []).filter(required).map((item) => item.id);
@@ -275,6 +332,7 @@ export function auditDeckSpec(deck, { inputDir = process.cwd() } = {}) {
       media: manifest.media?.length ?? 0,
       discoveredTableBlocks: collected.tables.length,
       discoveredImageBlocks: collected.images.length,
+      structuredSlides: collected.slideStructures.filter((slide) => slide.types.some((type) => structuredTypes.has(type))).length,
     },
   };
 }

@@ -115,8 +115,9 @@ node scripts/render-pptx.mjs --input output/example.pptx --output output/rendere
 - `summary`：标题下方的一句话结论。
 - `columns`：模块列数，范围 1–4；缺省时根据模块数量自动计算。
 - `gap`：模块间距，单位为英寸。
+- `visualExemptionReason`：仅当本页确为无稳定字段、无数值关系的纯叙述页时填写；非空时允许本页没有结构化内容块。
 
-每个模块至少应有 `title` 和内容。内容可以写在 `blocks` 数组中，也可以使用 `body`、`bullets`、`metrics`、`table`、`chart`、`image` 等简写字段。
+每个模块至少应有 `title` 和内容。内容可以写在 `blocks` 数组中，也可以使用 `body`、`bullets`、`metrics`、`matrix`、`callout`、`table`、`chart`、`image` 等简写字段。纯文字列表只有在[结构化表达.md](./结构化表达.md)允许时使用；单个模块确为同质叙述时填写非空 `plainListReason`。
 
 ### `table`
 
@@ -133,9 +134,28 @@ node scripts/render-pptx.mjs --input output/example.pptx --output output/rendere
 | `text` | `text` | 普通段落。 |
 | `bullets` | `items` | 项目符号数组；每项可为字符串，或带 `text`、`level` 的对象。 |
 | `metrics` | `items` | 指标卡数组；每项支持 `value`、`unit`、`label`、`color`。 |
+| `matrix` | `items` | 事项/任务矩阵；每项支持 `title`、`body`、`meta`、`color`，可用 `columns` 指定1–4列。 |
+| `callout` | `label`、`text` | 结论、风险或异常提示；`tone`支持`primary`、`danger`、`muted`。 |
 | `table` | `headers`、`rows` | 可选 `colWidths`；每行列数必须等于表头列数。 |
 | `chart` | `chartType`、`series` | 支持 `bar`、`column`、`line`、`pie`、`doughnut`。 |
 | `image` | `path` | 可选 `altText`；25 MB 内的 PNG、JPEG、GIF 会校验文件签名并按原始比例适配。 |
+
+示例：
+
+```json
+{
+  "type": "matrix",
+  "columns": 3,
+  "items": [
+    {"title": "任务A", "body": "保留完整行动说明", "meta": ["时间：6月", "状态：进行中"]},
+    {"title": "任务B", "body": "保留完整行动说明"}
+  ]
+}
+```
+
+```json
+{"type":"callout","label":"项目调整","text":"原文风险或调整说明","tone":"danger"}
+```
 
 ## 表格输入和拆分
 
@@ -162,7 +182,7 @@ node scripts/render-pptx.mjs --input output/example.pptx --output output/rendere
 
 ## 验收边界
 
-`audit-deck.mjs`检查源内容清单、原文、表格行列和媒体引用。`validate-pptx.mjs`检查 ZIP/OOXML 文件结构、必要条目、页面关系、页数和对象页面边界。二者都不能完全证明视觉效果正常。正式交付前仍须使用`render-pptx.mjs`或可靠的PowerPoint、LibreOffice、WPS能力把所有页面渲染为图片，并逐页进行视觉检查。
+`audit-deck.mjs`检查源内容清单、原文、表格行列、媒体引用和结构化表达。默认情况下，每个内容页至少包含 `metrics`、`matrix`、`callout`、`table`、`chart` 或 `image` 之一；明显的“标签：说明”长列表会失败。`validate-pptx.mjs`检查 ZIP/OOXML 文件结构、必要条目、页面关系、页数和对象页面边界。二者都不能完全证明视觉效果正常。正式交付前仍须使用`render-pptx.mjs`或可靠的PowerPoint、LibreOffice、WPS能力把所有页面渲染为图片，并逐页进行视觉检查。
 
 如果渲染失败，只能报告“内容和结构审计通过，视觉验收未完成”。不得用OOXML检查代替视觉验收，也不得为了继续任务而后台安装`python-pptx`或其他依赖。
 

@@ -31,7 +31,26 @@ function testDeck() {
         type: "content",
         title: "原文保真",
         sourceRef: "text-quote",
-        modules: [{ title: "规则", body: "保留“原始引号”和12.3456精度。", sourceRef: "text-quote" }],
+        columns: 2,
+        modules: [
+          { title: "规则", body: "保留“原始引号”和12.3456精度。", sourceRef: "text-quote" },
+          {
+            title: "结构化表达",
+            blocks: [
+              {
+                type: "matrix",
+                columns: 2,
+                items: [
+                  { title: "指标", body: "关键数字使用指标组" },
+                  { title: "任务", body: "行动项使用事项矩阵" },
+                  { title: "明细", body: "完整记录使用表格" },
+                  { title: "异常", body: "风险使用语义提示" }
+                ]
+              },
+              { type: "callout", label: "验收", text: "禁止把有稳定字段的内容退化为纯文字列表。" }
+            ]
+          }
+        ],
       },
       {
         type: "table",
@@ -58,6 +77,23 @@ function testDeck() {
 
 const validDeck = testDeck();
 assert.equal(auditDeckSpec(validDeck).ok, true, "完整清单应通过审计");
+
+const pureTextPage = structuredClone(validDeck);
+pureTextPage.slides[1].modules = [pureTextPage.slides[1].modules[0]];
+const pureTextAudit = auditDeckSpec(pureTextPage);
+assert.equal(pureTextAudit.ok, false, "没有结构化证据的内容页必须失败");
+assert(pureTextAudit.errors.some((message) => message.includes("只有正文/项目符号")), "错误应指出缺少结构化证据");
+pureTextPage.slides[1].visualExemptionReason = "本页仅验证一条不可拆分的原文，内容无稳定字段和比较关系。";
+assert.equal(auditDeckSpec(pureTextPage).ok, true, "说明纯叙述例外理由后应通过审计");
+
+const labeledList = structuredClone(validDeck);
+labeledList.slides[1].modules[1] = {
+  title: "行动计划",
+  bullets: ["任务A：完成方案", "任务B：组织评审", "任务C：提交成果"],
+};
+const labeledListAudit = auditDeckSpec(labeledList);
+assert.equal(labeledListAudit.ok, false, "多项标签说明不得退化为项目符号");
+assert(labeledListAudit.errors.some((message) => message.includes("标签：说明")), "错误应建议使用matrix或table");
 
 const missingColumn = structuredClone(validDeck);
 missingColumn.slides[2].table.headerRows[0].shift();

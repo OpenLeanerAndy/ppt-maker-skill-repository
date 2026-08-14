@@ -305,6 +305,8 @@ function normalizeBlocks(module) {
   if (module.body) blocks.push({ type: "text", text: module.body });
   if (module.bullets?.length) blocks.push({ type: "bullets", items: module.bullets });
   if (module.metrics?.length) blocks.push({ type: "metrics", items: module.metrics });
+  if (module.matrix) blocks.push({ type: "matrix", ...(Array.isArray(module.matrix) ? { items: module.matrix } : module.matrix) });
+  if (module.callout) blocks.push({ type: "callout", ...(typeof module.callout === "string" ? { text: module.callout } : module.callout) });
   if (module.table) blocks.push({ type: "table", ...module.table });
   if (module.chart) blocks.push({ type: "chart", ...module.chart });
   if (module.image) blocks.push({ type: "image", ...(typeof module.image === "string" ? { path: module.image } : module.image) });
@@ -314,6 +316,12 @@ function normalizeBlocks(module) {
 function blockWeight(block) {
   if (Number.isFinite(block.weight) && block.weight > 0) return block.weight;
   if (block.type === "metrics") return 1.1;
+  if (block.type === "matrix") {
+    const count = block.items?.length ?? 1;
+    const columns = Number.isInteger(block.columns) ? block.columns : Math.min(3, Math.max(1, count));
+    return Math.max(1.4, Math.ceil(count / columns) * 1.15);
+  }
+  if (block.type === "callout") return 0.8;
   if (block.type === "image" || block.type === "chart") return 2.1;
   if (block.type === "table") return Math.max(1.5, ((block.rows?.length ?? 2) + 1) * 0.34);
   if (block.type === "bullets") return Math.max(1, (block.items ?? []).join("").length / 90);
@@ -357,18 +365,36 @@ function assertTextFits(value, box, label, fontSize = BODY_FONT_SIZE, margin = 0
 
 function layoutBlocks(blocks, box) {
   const gap = 0.1;
-  const available = box.h - gap * Math.max(0, blocks.length - 1);
-  const weights = blocks.map(blockWeight);
-  const totalWeight = weights.reduce((sum, value) => sum + value, 0) || 1;
+  const gapTotal = gap * Math.max(0, blocks.length - 1);
+  const preferred = blocks.map((block) => preferredBlockHeight(block, box.w));
+  const fixedTotal = preferred.reduce((sum, value) => sum + (value ?? 0), 0);
+  const flexibleIndexes = preferred.map((value, index) => value === null ? index : -1).filter((index) => index >= 0);
+  if (fixedTotal + gapTotal > box.h + 0.02) {
+    throw new Error(`内容块在紧凑布局下仍需要 ${(fixedTotal + gapTotal).toFixed(2)} 英寸高度，但模块只有 ${box.h.toFixed(2)} 英寸；请增加模块高度或分页。`);
+  }
+  const flexibleSpace = box.h - fixedTotal - gapTotal;
+  const flexibleWeight = flexibleIndexes.reduce((sum, index) => sum + blockWeight(blocks[index]), 0) || 1;
   let cursor = box.y;
   return blocks.map((block, index) => {
-    const h = index === blocks.length - 1
-      ? box.y + box.h - cursor
-      : available * (weights[index] / totalWeight);
+    const h = preferred[index] ?? flexibleSpace * (blockWeight(block) / flexibleWeight);
     const placement = { block, x: box.x, y: cursor, w: box.w, h };
     cursor += h + gap;
     return placement;
   });
+}
+
+function preferredBlockHeight(block, width) {
+  const type = String(block?.type ?? "text").toLowerCase();
+  if (type === "metrics" && block.fillHeight !== true) return metricPreferredHeight(block);
+  if (type === "matrix") return matrixGeometry(block, { w: width }).requiredHeight;
+  if (type === "callout" && block.fillHeight !== true) return calloutRequiredHeight(block, width);
+  return null;
+}
+
+function metricPreferredHeight(block) {
+  const value = Number(block.maxHeight ?? 1.35);
+  if (!Number.isFinite(value) || value < 0.85) throw new Error("metrics.maxHeight 必须是不小于0.85英寸的数字。 ");
+  return value;
 }
 
 function addTextBlock(slide, context, block, box) {
@@ -411,26 +437,164 @@ function addBulletsBlock(slide, context, block, box) {
 function addMetricsBlock(slide, context, block, box) {
   const items = block.items ?? [];
   if (items.length === 0) return;
+  if (items.length > 8) throw new Error("单个指标组最多支持8项；请拆成多个指标组或分页。 ");
   const gap = 0.1;
   const cardW = (box.w - gap * (items.length - 1)) / items.length;
+  if (cardW < 0.8) throw new Error("指标卡宽度不足0.8英寸；请减少同组指标或增加模块宽度。 ");
+  const cardH = block.fillHeight === true ? box.h : Math.min(box.h, metricPreferredHeight(block));
+  if (cardH < 0.85) throw new Error("指标卡高度不足0.85英寸；请增加模块高度或减少同页内容。 ");
   items.forEach((item, index) => {
     const x = box.x + index * (cardW + gap);
+    const valueBox = { x: x + 0.04, y: box.y + 0.07, w: cardW - 0.08, h: cardH * 0.48 };
+    const label = [item.unit, item.label].filter(Boolean).join("\n");
+    const labelBox = { x: x + 0.06, y: box.y + cardH * 0.58, w: cardW - 0.12, h: cardH * 0.30 };
+    assertTextFits(String(item.value ?? ""), valueBox, "指标卡数值", 24, 0);
+    assertTextFits(label, labelBox, "指标卡标签", BODY_FONT_SIZE, 0);
     slide.addShape(context.pptx.ShapeType.rect, {
-      x, y: box.y, w: cardW, h: box.h,
+      x, y: box.y, w: cardW, h: cardH,
       fill: { color: context.theme.colors.white },
       line: { color: context.theme.colors.secondary, width: 0.75 },
     });
     slide.addText(String(item.value ?? ""), {
-      x: x + 0.04, y: box.y + 0.08, w: cardW - 0.08, h: box.h * 0.52,
+      ...valueBox,
       margin: 0, fontFace: context.theme.fontFace, fontSize: 24, bold: true,
       color: normalizeColor(item.color, context.theme.colors.primary),
-      align: "center", valign: "middle", fit: "shrink",
+      align: "center", valign: "middle",
     });
-    slide.addText([item.unit, item.label].filter(Boolean).join("\n"), {
-      x: x + 0.06, y: box.y + box.h * 0.58, w: cardW - 0.12, h: box.h * 0.31,
+    slide.addText(label, {
+      ...labelBox,
       margin: 0, fontFace: context.theme.fontFace, fontSize: 10, bold: true,
-      color: context.theme.colors.text, align: "center", valign: "middle", fit: "shrink",
+      color: context.theme.colors.text, align: "center", valign: "middle",
     });
+  });
+}
+
+function normalizeMatrixItem(item) {
+  if (typeof item === "string") return { title: "", body: item, meta: "" };
+  return {
+    title: String(item?.title ?? item?.label ?? ""),
+    body: String(item?.body ?? item?.text ?? item?.description ?? ""),
+    meta: Array.isArray(item?.meta) ? item.meta.join("\n") : String(item?.meta ?? ""),
+    color: item?.color,
+  };
+}
+
+function matrixColumns(count, box, requested) {
+  if (Number.isInteger(requested)) {
+    if (requested < 1 || requested > 4) throw new Error("matrix.columns 必须为 1–4 的整数。 ");
+    return Math.min(requested, count);
+  }
+  let columns = count <= 2 ? count : count <= 6 ? 3 : 4;
+  while (columns > 1 && (box.w - 0.1 * (columns - 1)) / columns < 1.65) columns -= 1;
+  return columns;
+}
+
+function matrixGeometry(block, box) {
+  const items = (block.items ?? []).map(normalizeMatrixItem);
+  if (items.length === 0) throw new Error("事项矩阵必须包含 items。 ");
+  if (items.length > 12) throw new Error("单个事项矩阵最多支持12项；请拆成多个模块或连续页面。 ");
+  const gap = 0.1;
+  const columns = matrixColumns(items.length, box, block.columns);
+  const rows = Math.ceil(items.length / columns);
+  const cardW = (box.w - gap * (columns - 1)) / columns;
+  const titleH = 0.31;
+  const rowHeights = Array.from({ length: rows }, (_, row) => {
+    const rowItems = items.slice(row * columns, (row + 1) * columns);
+    return Math.max(0.75, ...rowItems.map((item) => {
+      const detail = [item.body, item.meta].filter(Boolean).join("\n");
+      return titleH + 0.14 + estimatedTextHeight(detail, cardW - 0.16, BODY_FONT_SIZE, 0.06);
+    }));
+  });
+  const requiredHeight = rowHeights.reduce((sum, value) => sum + value, 0) + gap * (rows - 1);
+  const rowOffsets = [];
+  rowHeights.reduce((cursor, height, index) => {
+    rowOffsets[index] = cursor;
+    return cursor + height + gap;
+  }, 0);
+  return { items, gap, columns, cardW, titleH, rowHeights, rowOffsets, requiredHeight };
+}
+
+function addMatrixBlock(slide, context, block, box) {
+  const { items, gap, columns, cardW, titleH, rowHeights, rowOffsets, requiredHeight } = matrixGeometry(block, box);
+  if (requiredHeight > box.h + 0.02) {
+    throw new Error(`事项矩阵预计需要 ${requiredHeight.toFixed(2)} 英寸高度，但区域只有 ${box.h.toFixed(2)} 英寸；请增加模块高度、减少同页事项或分页。`);
+  }
+  items.forEach((item, index) => {
+    const row = Math.floor(index / columns);
+    const column = index % columns;
+    const x = box.x + column * (cardW + gap);
+    const y = box.y + rowOffsets[row];
+    const cardH = rowHeights[row];
+    const accent = normalizeColor(item.color, context.theme.colors.secondary);
+    slide.addShape(context.pptx.ShapeType.rect, {
+      x, y, w: cardW, h: cardH,
+      fill: { color: context.theme.colors.white },
+      line: { color: accent, width: 0.65 },
+    });
+    slide.addShape(context.pptx.ShapeType.rect, {
+      x, y, w: cardW, h: titleH,
+      fill: { color: context.theme.colors.pale },
+      line: { color: accent, width: 0.4 },
+    });
+    const title = item.title || `事项${index + 1}`;
+    assertTextFits(title, { w: cardW - 0.14, h: titleH - 0.08 }, "事项矩阵标题", BODY_FONT_SIZE, 0);
+    slide.addText(title, {
+      x: x + 0.07, y: y + 0.04, w: cardW - 0.14, h: titleH - 0.08,
+      margin: 0, fontFace: context.theme.fontFace, fontSize: BODY_FONT_SIZE, bold: true,
+      color: context.theme.colors.primary, align: "left", valign: "middle",
+    });
+    const detail = [item.body, item.meta].filter(Boolean).join("\n");
+    const detailBox = { x: x + 0.08, y: y + titleH + 0.07, w: cardW - 0.16, h: cardH - titleH - 0.14 };
+    assertTextFits(detail, detailBox, "事项矩阵正文");
+    slide.addText(detail, {
+      ...detailBox, margin: 0, fontFace: context.theme.fontFace, fontSize: BODY_FONT_SIZE,
+      color: context.theme.colors.text, align: "left", valign: "top", paraSpaceAfterPt: 3,
+    });
+  });
+}
+
+function calloutRequiredHeight(block, width) {
+  const label = String(block.label ?? block.title ?? "提示");
+  const value = String(block.text ?? block.body ?? "");
+  if (!value) throw new Error("提示块必须包含 text。 ");
+  const labelW = Math.min(2.0, Math.max(0.95, displayUnits(label) * 0.13 + 0.3));
+  return Math.max(0.55, estimatedTextHeight(value, width - labelW - 0.12, BODY_FONT_SIZE, 0) + 0.12);
+}
+
+function addCalloutBlock(slide, context, block, box) {
+  const label = String(block.label ?? block.title ?? "提示");
+  const value = String(block.text ?? block.body ?? "");
+  if (!value) throw new Error("提示块必须包含 text。 ");
+  const tone = String(block.tone ?? "primary").toLowerCase();
+  const accent = tone === "danger"
+    ? context.theme.colors.danger
+    : tone === "muted"
+      ? context.theme.colors.muted
+      : context.theme.colors.primary;
+  const fill = tone === "danger" ? "FCE8E6" : context.theme.colors.pale;
+  const labelW = Math.min(2.0, Math.max(0.95, displayUnits(label) * 0.13 + 0.3));
+  const requiredHeight = calloutRequiredHeight(block, box.w);
+  if (requiredHeight > box.h + 0.02) throw new Error(`提示块预计需要 ${requiredHeight.toFixed(2)} 英寸高度，但区域只有 ${box.h.toFixed(2)} 英寸。`);
+  const h = block.fillHeight === true ? box.h : requiredHeight;
+  slide.addShape(context.pptx.ShapeType.rect, {
+    x: box.x, y: box.y, w: box.w, h,
+    fill: { color: fill }, line: { color: accent, width: 0.75 },
+  });
+  slide.addShape(context.pptx.ShapeType.rect, {
+    x: box.x, y: box.y, w: 0.07, h,
+    fill: { color: accent }, line: { color: accent, width: 0 },
+  });
+  assertTextFits(label, { w: labelW - 0.18, h: h - 0.12 }, "提示块标签", BODY_FONT_SIZE, 0);
+  slide.addText(label, {
+    x: box.x + 0.14, y: box.y + 0.06, w: labelW - 0.18, h: h - 0.12,
+    margin: 0, fontFace: context.theme.fontFace, fontSize: BODY_FONT_SIZE, bold: true,
+    color: accent, align: "left", valign: "middle",
+  });
+  const textBox = { x: box.x + labelW, y: box.y + 0.06, w: box.w - labelW - 0.12, h: h - 0.12 };
+  assertTextFits(value, textBox, "提示块正文", BODY_FONT_SIZE, 0);
+  slide.addText(value, {
+    ...textBox, margin: 0, fontFace: context.theme.fontFace, fontSize: BODY_FONT_SIZE,
+    color: context.theme.colors.text, align: "left", valign: "middle",
   });
 }
 
@@ -638,6 +802,8 @@ function renderBlock(slide, context, placement) {
   if (type === "text") addTextBlock(slide, context, block, box);
   else if (type === "bullets") addBulletsBlock(slide, context, block, box);
   else if (type === "metrics") addMetricsBlock(slide, context, block, box);
+  else if (type === "matrix") addMatrixBlock(slide, context, block, box);
+  else if (type === "callout") addCalloutBlock(slide, context, block, box);
   else if (type === "table") addTableBlock(slide, context, block, box);
   else if (type === "chart") addChartBlock(slide, context, block, box);
   else if (type === "image") addImageBlock(slide, context, block, box);

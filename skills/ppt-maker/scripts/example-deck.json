@@ -70,16 +70,18 @@
       "title": "方案概览",
       "summary": "采用“内容结构化—页面生成—结构校验”的可复用流程。",
       "columns": 3,
+      "columnWeights": [1.1, 1.0, 1.2],
       "modules": [
         {
           "title": "输入",
           "blocks": [
             {
-              "type": "bullets",
+              "type": "matrix",
+              "columns": 1,
               "items": [
-                "用户确认的页面大纲",
-                "每页的标题、结论与支撑材料",
-                "品牌颜色、字体和 Logo"
+                {"title": "页面大纲", "body": "用户确认的页面顺序与模块关系"},
+                {"title": "内容证据", "body": "每页的标题、结论与支撑材料"},
+                {"title": "视觉约束", "body": "品牌颜色、字体和 Logo"}
               ]
             }
           ]
@@ -90,14 +92,18 @@
         },
         {
           "title": "输出",
-          "metrics": [
+          "blocks": [
             {
-              "value": "100%",
-              "label": "元素可编辑"
+              "type": "metrics",
+              "items": [
+                {"value": "100%", "label": "元素可编辑"},
+                {"value": "16:9", "label": "页面比例"}
+              ]
             },
             {
-              "value": "16:9",
-              "label": "页面比例"
+              "type": "callout",
+              "label": "验收",
+              "text": "生成后执行内容、结构和视觉三层检查。"
             }
           ]
         }
