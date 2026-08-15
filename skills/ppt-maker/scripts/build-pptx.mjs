@@ -354,21 +354,33 @@ function estimatedTextHeight(value, width, fontSize = BODY_FONT_SIZE, margin = 0
   return estimatedWrappedLines(value, width - margin * 2, fontSize) * lineHeight + margin * 2 + 0.04;
 }
 
-function assertTextFits(value, box, label, fontSize = BODY_FONT_SIZE, margin = 0.06) {
+function assertTextFits(value, box, label, fontSize = BODY_FONT_SIZE, margin = 0.06, allowOverflow = false) {
   const required = estimatedTextHeight(value, box.w, fontSize, margin);
-  if (required > box.h + 0.02) {
+  if (!allowOverflow && required > box.h + 0.02) {
     throw new Error(
       `${label}预计需要 ${required.toFixed(2)} 英寸高度，但区域只有 ${box.h.toFixed(2)} 英寸；请增加区域、拆分模块或分页，不得缩小字号或让文字越界。`,
     );
   }
 }
 
-function layoutBlocks(blocks, box) {
+function layoutBlocks(blocks, box, { allowOverflow = false } = {}) {
   const gap = 0.1;
   const gapTotal = gap * Math.max(0, blocks.length - 1);
   const preferred = blocks.map((block) => preferredBlockHeight(block, box.w));
   const fixedTotal = preferred.reduce((sum, value) => sum + (value ?? 0), 0);
   const flexibleIndexes = preferred.map((value, index) => value === null ? index : -1).filter((index) => index >= 0);
+  if (allowOverflow) {
+    const natural = blocks.map((block, index) => preferred[index] ?? naturalBlockHeight(block, box.w));
+    const naturalTotal = natural.reduce((sum, value) => sum + value, 0) + gapTotal;
+    if (naturalTotal > box.h + 0.02) {
+      let naturalCursor = box.y;
+      return blocks.map((block, index) => {
+        const placement = { block, x: box.x, y: naturalCursor, w: box.w, h: natural[index] };
+        naturalCursor += natural[index] + gap;
+        return placement;
+      });
+    }
+  }
   if (fixedTotal + gapTotal > box.h + 0.02) {
     throw new Error(`内容块在紧凑布局下仍需要 ${(fixedTotal + gapTotal).toFixed(2)} 英寸高度，但模块只有 ${box.h.toFixed(2)} 英寸；请增加模块高度或分页。`);
   }
@@ -381,6 +393,24 @@ function layoutBlocks(blocks, box) {
     cursor += h + gap;
     return placement;
   });
+}
+
+function naturalBlockHeight(block, width) {
+  const type = String(block?.type ?? "text").toLowerCase();
+  if (type === "text") return Math.max(0.45, estimatedTextHeight(block.text ?? "", width));
+  if (type === "bullets") {
+    const text = (block.items ?? []).map((item) => typeof item === "string" ? item : item?.text ?? "").join("\n");
+    return Math.max(0.55, estimatedTextHeight(text, width));
+  }
+  if (type === "table") {
+    const headers = tableModel.tableHeaderRows(block);
+    const columns = tableModel.tableColumns(block);
+    const widths = normalizeColumnWidths(block, columns, width);
+    return [...headers.map((row) => estimateTableRowHeight(row, widths, { header: true })), ...(block.rows ?? []).map((row) => estimateTableRowHeight(row, widths))]
+      .reduce((sum, value) => sum + value, 0);
+  }
+  if (type === "image" || type === "chart") return Number(block.naturalHeight ?? 2.1);
+  return Math.max(0.65, blockWeight(block) * 0.7);
 }
 
 function preferredBlockHeight(block, width) {
@@ -399,7 +429,7 @@ function metricPreferredHeight(block) {
 
 function addTextBlock(slide, context, block, box) {
   const value = String(block.text ?? "");
-  assertTextFits(value, box, "正文文本");
+  assertTextFits(value, box, "正文文本", BODY_FONT_SIZE, 0.06, context.allowOverflow);
   slide.addText(String(block.text ?? ""), {
     x: box.x, y: box.y, w: box.w, h: box.h,
     margin: 0.06, fontFace: context.theme.fontFace,
@@ -413,7 +443,7 @@ function addBulletsBlock(slide, context, block, box) {
   const plainText = (block.items ?? [])
     .map((item) => (typeof item === "string" ? item : item?.text ?? ""))
     .join("\n");
-  assertTextFits(plainText, box, "项目符号文本");
+  assertTextFits(plainText, box, "项目符号文本", BODY_FONT_SIZE, 0.06, context.allowOverflow);
   const items = (block.items ?? []).map((item, index, array) => ({
     text: typeof item === "string" ? item : item.text,
     options: {
@@ -448,8 +478,8 @@ function addMetricsBlock(slide, context, block, box) {
     const valueBox = { x: x + 0.04, y: box.y + 0.07, w: cardW - 0.08, h: cardH * 0.48 };
     const label = [item.unit, item.label].filter(Boolean).join("\n");
     const labelBox = { x: x + 0.06, y: box.y + cardH * 0.58, w: cardW - 0.12, h: cardH * 0.30 };
-    assertTextFits(String(item.value ?? ""), valueBox, "指标卡数值", 24, 0);
-    assertTextFits(label, labelBox, "指标卡标签", BODY_FONT_SIZE, 0);
+    assertTextFits(String(item.value ?? ""), valueBox, "指标卡数值", 24, 0, context.allowOverflow);
+    assertTextFits(label, labelBox, "指标卡标签", BODY_FONT_SIZE, 0, context.allowOverflow);
     slide.addShape(context.pptx.ShapeType.rect, {
       x, y: box.y, w: cardW, h: cardH,
       fill: { color: context.theme.colors.white },
@@ -516,7 +546,7 @@ function matrixGeometry(block, box) {
 
 function addMatrixBlock(slide, context, block, box) {
   const { items, gap, columns, cardW, titleH, rowHeights, rowOffsets, requiredHeight } = matrixGeometry(block, box);
-  if (requiredHeight > box.h + 0.02) {
+  if (!context.allowOverflow && requiredHeight > box.h + 0.02) {
     throw new Error(`事项矩阵预计需要 ${requiredHeight.toFixed(2)} 英寸高度，但区域只有 ${box.h.toFixed(2)} 英寸；请增加模块高度、减少同页事项或分页。`);
   }
   items.forEach((item, index) => {
@@ -537,7 +567,7 @@ function addMatrixBlock(slide, context, block, box) {
       line: { color: accent, width: 0.4 },
     });
     const title = item.title || `事项${index + 1}`;
-    assertTextFits(title, { w: cardW - 0.14, h: titleH - 0.08 }, "事项矩阵标题", BODY_FONT_SIZE, 0);
+    assertTextFits(title, { w: cardW - 0.14, h: titleH - 0.08 }, "事项矩阵标题", BODY_FONT_SIZE, 0, context.allowOverflow);
     slide.addText(title, {
       x: x + 0.07, y: y + 0.04, w: cardW - 0.14, h: titleH - 0.08,
       margin: 0, fontFace: context.theme.fontFace, fontSize: BODY_FONT_SIZE, bold: true,
@@ -545,7 +575,7 @@ function addMatrixBlock(slide, context, block, box) {
     });
     const detail = [item.body, item.meta].filter(Boolean).join("\n");
     const detailBox = { x: x + 0.08, y: y + titleH + 0.07, w: cardW - 0.16, h: cardH - titleH - 0.14 };
-    assertTextFits(detail, detailBox, "事项矩阵正文");
+    assertTextFits(detail, detailBox, "事项矩阵正文", BODY_FONT_SIZE, 0.06, context.allowOverflow);
     slide.addText(detail, {
       ...detailBox, margin: 0, fontFace: context.theme.fontFace, fontSize: BODY_FONT_SIZE,
       color: context.theme.colors.text, align: "left", valign: "top", paraSpaceAfterPt: 3,
@@ -574,7 +604,7 @@ function addCalloutBlock(slide, context, block, box) {
   const fill = tone === "danger" ? "FCE8E6" : context.theme.colors.pale;
   const labelW = Math.min(2.0, Math.max(0.95, displayUnits(label) * 0.13 + 0.3));
   const requiredHeight = calloutRequiredHeight(block, box.w);
-  if (requiredHeight > box.h + 0.02) throw new Error(`提示块预计需要 ${requiredHeight.toFixed(2)} 英寸高度，但区域只有 ${box.h.toFixed(2)} 英寸。`);
+  if (!context.allowOverflow && requiredHeight > box.h + 0.02) throw new Error(`提示块预计需要 ${requiredHeight.toFixed(2)} 英寸高度，但区域只有 ${box.h.toFixed(2)} 英寸。`);
   const h = block.fillHeight === true ? box.h : requiredHeight;
   slide.addShape(context.pptx.ShapeType.rect, {
     x: box.x, y: box.y, w: box.w, h,
@@ -584,14 +614,14 @@ function addCalloutBlock(slide, context, block, box) {
     x: box.x, y: box.y, w: 0.07, h,
     fill: { color: accent }, line: { color: accent, width: 0 },
   });
-  assertTextFits(label, { w: labelW - 0.18, h: h - 0.12 }, "提示块标签", BODY_FONT_SIZE, 0);
+  assertTextFits(label, { w: labelW - 0.18, h: h - 0.12 }, "提示块标签", BODY_FONT_SIZE, 0, context.allowOverflow);
   slide.addText(label, {
     x: box.x + 0.14, y: box.y + 0.06, w: labelW - 0.18, h: h - 0.12,
     margin: 0, fontFace: context.theme.fontFace, fontSize: BODY_FONT_SIZE, bold: true,
     color: accent, align: "left", valign: "middle",
   });
   const textBox = { x: box.x + labelW, y: box.y + 0.06, w: box.w - labelW - 0.12, h: h - 0.12 };
-  assertTextFits(value, textBox, "提示块正文", BODY_FONT_SIZE, 0);
+  assertTextFits(value, textBox, "提示块正文", BODY_FONT_SIZE, 0, context.allowOverflow);
   slide.addText(value, {
     ...textBox, margin: 0, fontFace: context.theme.fontFace, fontSize: BODY_FONT_SIZE,
     color: context.theme.colors.text, align: "left", valign: "middle",
@@ -662,7 +692,7 @@ function estimateTableRowHeight(row, widths, { header = false } = {}) {
   return Math.max(header ? 0.31 : MIN_BODY_ROW_HEIGHT, lines * lineHeight + 0.10);
 }
 
-function renderTable(slide, context, headerRows, bodyRows, box, widths) {
+function renderTable(slide, context, headerRows, bodyRows, box, widths, { allowOverflow = false } = {}) {
   const data = [
     ...headerRows.map((row) => row.map((cell) => styleTableCell(cell, context, { header: true, rowIndex: 0 }))),
     ...bodyRows.map((row, rowIndex) => row.map((cell) => styleTableCell(cell, context, { header: false, rowIndex }))),
@@ -672,7 +702,7 @@ function renderTable(slide, context, headerRows, bodyRows, box, widths) {
     ...bodyRows.map((row) => estimateTableRowHeight(row, widths)),
   ];
   const height = rowHeights.reduce((sum, value) => sum + value, 0);
-  if (height > box.h + 0.02) throw new Error("内部错误：表格分段后仍超过目标区域。 ");
+  if (!allowOverflow && height > box.h + 0.02) throw new Error("内部错误：表格分段后仍超过目标区域。 ");
   slide.addTable(data, {
     x: box.x, y: box.y, w: box.w, h: height,
     colW: widths,
@@ -687,7 +717,7 @@ function renderTable(slide, context, headerRows, bodyRows, box, widths) {
   });
 }
 
-function splitRowsByHeight(rows, widths, headerRows, height) {
+function splitRowsByHeight(rows, widths, headerRows, height, segmentCount = 2) {
   const headerHeight = headerRows.reduce((sum, row) => sum + estimateTableRowHeight(row, widths, { header: true }), 0);
   if (headerHeight >= height) throw new Error("表格多级表头本身已超过目标区域高度。 ");
   const capacity = height - headerHeight;
@@ -698,19 +728,38 @@ function splitRowsByHeight(rows, widths, headerRows, height) {
     }
   }
   const total = rowHeights.reduce((sum, value) => sum + value, 0);
-  if (total > capacity * 2 + 0.02) return { segments: null, required: Math.ceil(total / capacity) };
-  let leftHeight = 0;
-  let best = null;
-  for (let index = 1; index < rows.length; index += 1) {
-    leftHeight += rowHeights[index - 1];
-    const rightHeight = total - leftHeight;
-    if (leftHeight <= capacity + 0.02 && rightHeight <= capacity + 0.02) {
-      const difference = Math.abs(leftHeight - rightHeight);
-      if (!best || difference < best.difference) best = { index, difference };
+  const required = Math.ceil(total / capacity);
+  if (required > segmentCount || rows.length < segmentCount) return { segments: null, required: Math.max(required, segmentCount) };
+  const segments = [];
+  let start = 0;
+  let remainingHeight = total;
+  for (let segment = 0; segment < segmentCount; segment += 1) {
+    const remainingSegments = segmentCount - segment;
+    if (remainingSegments === 1) {
+      segments.push(rows.slice(start));
+      break;
     }
+    const target = remainingHeight / remainingSegments;
+    let used = 0;
+    let end = start;
+    const lastAllowed = rows.length - (remainingSegments - 1);
+    while (end < lastAllowed) {
+      const next = rowHeights[end];
+      if (used > 0 && used + next > target && used <= capacity + 0.02) break;
+      if (used + next > capacity + 0.02) break;
+      used += next;
+      end += 1;
+    }
+    if (end === start) return { segments: null, required: segmentCount + 1 };
+    segments.push(rows.slice(start, end));
+    start = end;
+    remainingHeight -= used;
   }
-  if (!best) return { segments: null, required: 3 };
-  return { segments: [rows.slice(0, best.index), rows.slice(best.index)], required: 2 };
+  if (segments.length !== segmentCount || segments.some((segment) => segment.length === 0)) {
+    return { segments: null, required: segmentCount + 1 };
+  }
+  const valid = segments.every((segment) => segment.reduce((sum, row) => sum + estimateTableRowHeight(row, widths), 0) <= capacity + 0.02);
+  return valid ? { segments, required: segmentCount } : { segments: null, required: segmentCount + 1 };
 }
 
 function addTableBlock(slide, context, block, box) {
@@ -734,8 +783,13 @@ function addTableBlock(slide, context, block, box) {
     return;
   }
 
+  if (context.allowOverflow) {
+    renderTable(slide, context, headerRows, rows, box, widths, { allowOverflow: true });
+    return;
+  }
+
   const splitMode = String(block.splitMode ?? "none").toLowerCase();
-  if (!["rows-two-column", "columns", "paginate", "none"].includes(splitMode)) throw new Error(`不支持的表格 splitMode：${splitMode}`);
+  if (!["rows-two-column", "rows-three-column", "columns", "paginate", "none"].includes(splitMode)) throw new Error(`不支持的表格 splitMode：${splitMode}`);
   if (splitMode === "none") {
     throw new Error(`表格预计需要 ${totalHeight.toFixed(2)} 英寸高度，但区域只有 ${box.h.toFixed(2)} 英寸；请先在大纲中确认拆分方案，不得自动分栏、越界或裁切。`);
   }
@@ -745,20 +799,23 @@ function addTableBlock(slide, context, block, box) {
   if (splitMode === "paginate") {
     throw new Error("模块内表格不能直接 paginate；请在大纲阶段改为独立连续表格页。 ");
   }
-  if (columnCount > Number(block.maxColumnsForSideSplit ?? 6) || box.w < 8) {
+  const segmentCount = splitMode === "rows-three-column" ? 3 : 2;
+  const maxColumns = segmentCount === 3 ? Number(block.maxColumnsForThreeSplit ?? 4) : Number(block.maxColumnsForSideSplit ?? 6);
+  if (columnCount > maxColumns || box.w < 8) {
     throw new Error(`表格有 ${columnCount} 列且纵向超高，不适合左右并排；请在大纲阶段拆成连续页面，每页保留全部列和重复表头。`);
   }
 
   const gap = Number.isFinite(block.splitGap) ? block.splitGap : 0.16;
-  const segmentWidth = (box.w - gap) / 2;
+  const segmentWidth = (box.w - gap * (segmentCount - 1)) / segmentCount;
   const segmentWidths = normalizeColumnWidths(block, columnCount, segmentWidth);
-  const split = splitRowsByHeight(rows, segmentWidths, headerRows, box.h);
+  const split = splitRowsByHeight(rows, segmentWidths, headerRows, box.h, segmentCount);
   if (!split.segments) {
-    throw new Error(`表格在10号字下至少需要 ${split.required} 个纵向分段；当前页面只允许左右两个表格，请拆成连续页面。`);
+    throw new Error(`表格在10号字下至少需要 ${split.required} 个纵向分段；当前已尝试同页 ${segmentCount} 段，请返回大纲阶段继续重排并询问用户是否拆页。`);
   }
   const segments = split.segments;
-  renderTable(slide, context, headerRows, segments[0], { ...box, w: segmentWidth }, segmentWidths);
-  renderTable(slide, context, headerRows, segments[1], { ...box, x: box.x + segmentWidth + gap, w: segmentWidth }, segmentWidths);
+  segments.forEach((segment, index) => {
+    renderTable(slide, context, headerRows, segment, { ...box, x: box.x + index * (segmentWidth + gap), w: segmentWidth }, segmentWidths);
+  });
 }
 
 function addChartBlock(slide, context, block, box) {
@@ -842,7 +899,7 @@ function addModule(slide, context, module, box) {
     h: box.h - titleH - 0.22,
   };
   const blocks = normalizeBlocks(module);
-  layoutBlocks(blocks, inner).forEach((placement) => renderBlock(slide, context, placement));
+  layoutBlocks(blocks, inner, { allowOverflow: context.allowOverflow }).forEach((placement) => renderBlock(slide, context, placement));
 }
 
 function gridColumns(count, requested) {
@@ -900,7 +957,7 @@ function addContentSlide(slide, context, spec, pageNumber) {
       fill: { color: context.theme.colors.white },
       line: { color: context.theme.colors.secondary, width: 0.8 },
     });
-    assertTextFits(spec.summary, { w: 11.75, h: 0.4 }, "页面总述", 14, 0);
+    assertTextFits(spec.summary, { w: 11.75, h: 0.4 }, "页面总述", 14, 0, context.allowOverflow);
     slide.addText(spec.summary, {
       x: 0.78, y: 1.25, w: 11.75, h: 0.4,
       margin: 0, fontFace: context.theme.fontFace, fontSize: 14, bold: true,
@@ -945,7 +1002,7 @@ function addContentSlide(slide, context, spec, pageNumber) {
 function addTableSlide(slide, context, spec, pageNumber) {
   addHeader(slide, context, spec.title || "表格", pageNumber);
   if (spec.summary) {
-    assertTextFits(spec.summary, { w: 12.1, h: 0.48 }, "表格页总述", 14, 0);
+    assertTextFits(spec.summary, { w: 12.1, h: 0.48 }, "表格页总述", 14, 0, context.allowOverflow);
     slide.addText(spec.summary, {
       x: 0.6, y: 1.12, w: 12.1, h: 0.48,
       margin: 0, fontFace: context.theme.fontFace, fontSize: 14, bold: true,
@@ -988,6 +1045,10 @@ function expandOversizedTableSlides(slides) {
   for (const spec of slides) {
     const type = String(spec.type ?? "content").toLowerCase();
     if (type !== "table") {
+      expanded.push(spec);
+      continue;
+    }
+    if (spec.overflowPolicy === "warn-and-proceed") {
       expanded.push(spec);
       continue;
     }
@@ -1086,18 +1147,22 @@ export async function buildPptx({ inputPath, outputPath, validate = true }) {
   defineLogoMasters(context);
 
   const slideSpecs = expandOversizedTableSlides(deck.slides);
+  const allowedOverflowSlides = [];
   slideSpecs.forEach((spec, index) => {
     const pageNumber = index + 1;
+    const allowOverflow = spec.overflowPolicy === "warn-and-proceed";
+    if (allowOverflow) allowedOverflowSlides.push(pageNumber);
+    const slideContext = { ...context, allowOverflow };
     const type = String(spec.type ?? "content").toLowerCase();
     const masterName = ["title", "closing"].includes(type) ? "PPT_MAKER_TITLE" : "PPT_MAKER_CONTENT";
     const slide = pptx.addSlide(masterName);
     slide.background = { color: context.theme.colors.white };
-    if (type === "title") addTitleSlide(slide, context, spec);
-    else if (type === "agenda") addAgendaSlide(slide, context, spec, pageNumber, false);
-    else if (type === "section") addAgendaSlide(slide, context, spec, pageNumber, true);
-    else if (type === "content") addContentSlide(slide, context, spec, pageNumber);
-    else if (type === "table") addTableSlide(slide, context, spec, pageNumber);
-    else if (type === "closing") addClosingSlide(slide, context, spec);
+    if (type === "title") addTitleSlide(slide, slideContext, spec);
+    else if (type === "agenda") addAgendaSlide(slide, slideContext, spec, pageNumber, false);
+    else if (type === "section") addAgendaSlide(slide, slideContext, spec, pageNumber, true);
+    else if (type === "content") addContentSlide(slide, slideContext, spec, pageNumber);
+    else if (type === "table") addTableSlide(slide, slideContext, spec, pageNumber);
+    else if (type === "closing") addClosingSlide(slide, slideContext, spec);
     else throw new Error(`第 ${pageNumber} 页使用了不支持的页面类型：${type}`);
   });
 
@@ -1107,7 +1172,7 @@ export async function buildPptx({ inputPath, outputPath, validate = true }) {
   fs.mkdirSync(path.dirname(absoluteOutput), { recursive: true });
   await pptx.writeFile({ fileName: absoluteOutput, compression: true });
 
-  const validation = validate ? validatePptx(absoluteOutput, { expectedSlides: slideSpecs.length }) : null;
+  const validation = validate ? validatePptx(absoluteOutput, { expectedSlides: slideSpecs.length, allowedOverflowSlides }) : null;
   if (validation && !validation.ok) {
     throw new Error(`PPTX 已生成但结构校验失败：${validation.errors.join("；")}`);
   }
@@ -1119,6 +1184,11 @@ export async function buildPptx({ inputPath, outputPath, validate = true }) {
     pptxgenjs: runtime.version,
     audit,
     validation,
+    deliveryStatus: validation?.softBoundaryIssues?.length
+      ? "generated-with-boundary-decision-pending"
+      : allowedOverflowSlides.length > 0
+        ? "generated-with-boundary-review-required"
+        : "complete",
   };
 }
 
@@ -1138,6 +1208,11 @@ if (isMain) {
       console.log(`页面：${result.slides}；PptxGenJS：${result.pptxgenjs}`);
       console.log(`内容保真审计：通过；必需条目 ${result.audit.stats.requiredItems} 项`);
       if (result.validation) console.log("结构校验：通过");
+      if (result.deliveryStatus === "generated-with-boundary-decision-pending") {
+        console.log("交付状态：文件已生成，仅边界问题待用户决定；不得声明完整验收通过。");
+      } else if (result.deliveryStatus === "generated-with-boundary-review-required") {
+        console.log("交付状态：文件已生成，必须完成全页渲染后再判断是否存在边界问题。");
+      }
     }
   } catch (error) {
     console.error(`生成失败：${error.message}`);

@@ -157,6 +157,8 @@ export function validatePptx(filePath, options = {}) {
   const absolutePath = path.resolve(filePath);
   const errors = [];
   const warnings = [];
+  const allowedOverflowSlides = new Set((options.allowedOverflowSlides ?? []).map(Number));
+  const softBoundaryIssues = [];
 
   if (!fs.existsSync(absolutePath)) {
     return { ok: false, file: absolutePath, errors: ["文件不存在。"], warnings };
@@ -218,18 +220,38 @@ export function validatePptx(filePath, options = {}) {
     if (slideWidth && slideHeight) {
       for (const slide of slides) {
         const xml = readEntry(buffer, slide).toString("utf8");
+        const slideNumber = naturalSlideNumber(slide.name);
+        const boundaryIsSoft = allowedOverflowSlides.has(slideNumber);
         const tablesOnSlide = [...xml.matchAll(/<a:tbl>/g)].length;
         tableCount += tablesOnSlide;
         slideTableCounts.push({ slide: naturalSlideNumber(slide.name), tables: tablesOnSlide });
         const bounds = slideBoundsIssues(xml, slideWidth, slideHeight);
-        if (bounds.length > 0) errors.push(`${slide.name} 有 ${bounds.length} 个对象超出页面边界。`);
+        if (bounds.length > 0) {
+          const message = `${slide.name} 有 ${bounds.length} 个对象超出页面边界。`;
+          if (boundaryIsSoft) {
+            warnings.push(`用户确认不拆页：${message}`);
+            softBoundaryIssues.push({ slide: slideNumber, type: "object-outside-slide", count: bounds.length });
+          } else errors.push(message);
+        }
         const renderedBounds = tableRenderedBoundsIssues(xml, slideHeight);
         if (renderedBounds.length > 0) {
           slideTableRenderedBounds.push({ slide: naturalSlideNumber(slide.name), issues: renderedBounds });
           const frameIssues = renderedBounds.filter((issue) => issue.type === "rows-exceed-frame").length;
           const slideIssues = renderedBounds.filter((issue) => issue.type === "rows-exceed-slide").length;
-          if (frameIssues > 0) errors.push(`${slide.name} 有 ${frameIssues} 个表格的实际行高之和超出表格对象框，可能越过所属模块。`);
-          if (slideIssues > 0) errors.push(`${slide.name} 有 ${slideIssues} 个表格按实际行高计算超出页面下边界。`);
+          if (frameIssues > 0) {
+            const message = `${slide.name} 有 ${frameIssues} 个表格的实际行高之和超出表格对象框，可能越过所属模块。`;
+            if (boundaryIsSoft) {
+              warnings.push(`用户确认不拆页：${message}`);
+              softBoundaryIssues.push({ slide: slideNumber, type: "table-rows-outside-frame", count: frameIssues });
+            } else errors.push(message);
+          }
+          if (slideIssues > 0) {
+            const message = `${slide.name} 有 ${slideIssues} 个表格按实际行高计算超出页面下边界。`;
+            if (boundaryIsSoft) {
+              warnings.push(`用户确认不拆页：${message}`);
+              softBoundaryIssues.push({ slide: slideNumber, type: "table-rows-outside-slide", count: slideIssues });
+            } else errors.push(message);
+          }
         }
       }
     } else warnings.push("无法读取幻灯片尺寸，未执行对象边界检查。 ");
@@ -290,6 +312,7 @@ export function validatePptx(filePath, options = {}) {
     tables: tableCount,
     slideTableCounts,
     slideTableRenderedBounds,
+    softBoundaryIssues,
     errors,
     warnings,
   };

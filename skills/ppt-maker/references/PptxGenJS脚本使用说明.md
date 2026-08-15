@@ -129,6 +129,8 @@ node scripts/render-pptx.mjs --input output/example.pptx --output output/rendere
 - `columns`：模块列数，范围1–4；缺省时为1。只有大纲确认并列/对照关系时才显式设置为多列。
 - `layoutFlow`：`single-column`、`multi-column`、`full-table`或`mixed`，必须与`sourceManifest.contentGroups[].preferredFlow`一致。
 - `contentGroupRef`：该页对应的语义组；一个组默认只能出现于一页。
+- `overflowPolicy`：仅当用户收到容量预警后仍明确坚持不拆页时设为`warn-and-proceed`。
+- `overflowApprovalRef`：用户坚持不拆页的确认记录；必须与对应`contentGroup`一致。
 - `gap`：模块间距，单位为英寸。
 - `visualExemptionReason`：仅当本页确为无稳定字段、无数值关系的纯叙述页时填写；非空时允许本页没有结构化内容块。
 
@@ -180,9 +182,12 @@ node scripts/render-pptx.mjs --input output/example.pptx --output output/rendere
 - 脚本按列宽、文字长度、10号字和1.3倍行距估算行高。超高表格默认`splitMode: "none"`并报错，禁止生成阶段自动决定拆分。
 - 只有大纲已确认拆分时，才能同时提供非空`splitReason`和`approvalRef`，并选择：
   - `splitMode: "rows-two-column"`：按正文行拆成左右两个表，重复完整多级表头和全部逻辑列；兼容旧值`columns`。
+  - `splitMode: "rows-three-column"`：按正文行拆成三个左右并列表格，适合逻辑列少、横向缩窄后仍可读的长表。
   - `splitMode: "paginate"`：仅用于独立表格页，按正文行生成连续页。
 - 每个表格块必须声明`orientation: "source"`和`rowHeaderColumns`。不得使用转置或拆列解决容量问题。
-- 脚本不会通过缩小到10号字以下、越过模块边框或删除数据来完成布局。
+- 使用分页前，先在大纲阶段依次尝试扩大表格区域、让表格独占一行、调整上下复合布局以及2—3段同页横向拆表，再把更新后的大纲交给用户确认。
+- 单页方案仍不够时，设置`capacityStatus: "warning-pending"`并暂停生成，询问用户是否拆页。
+- 用户坚持不拆页时，内容组和页面同时设置`overflowPolicy: "warn-and-proceed"`与相同的`overflowApprovalRef`。脚本允许先生成，但只把对象或表格边界问题记为警告；删除数据、缺失图表、表格结构变化等仍然报错。
 
 内容页默认按模块内容量分配行列尺寸。需要精确复合布局时，可给每个模块提供归一化`layout: {"x":0,"y":0,"w":0.6,"h":1}`；所有模块必须位于0–1的内容区域内且不得重叠。
 
@@ -198,7 +203,9 @@ node scripts/render-pptx.mjs --input output/example.pptx --output output/rendere
 
 ## 验收边界
 
-`audit-deck.mjs`检查源内容清单、原文、表格多级表头与正文二维矩阵、媒体引用、内容组、阅读流和拆页依据。`validate-pptx.mjs`检查ZIP/OOXML、页面关系、对象外框，以及表格各行实际高度是否超出表格框或页面。形状模拟表格和模块语义边界仍必须通过全页渲染检查；不得把结构检查通过表述成视觉验收通过。
+`audit-deck.mjs`检查源内容清单、原文、表格多级表头与正文二维矩阵、媒体引用、内容组、阅读流和拆页/不拆页依据。`validate-pptx.mjs`检查ZIP/OOXML、页面关系、对象外框，以及表格各行实际高度是否超出表格框或页面。形状模拟表格和模块语义边界仍必须通过全页渲染检查；不得把结构检查通过表述成视觉验收通过。
+
+当`deliveryStatus`为`generated-with-boundary-decision-pending`时，文件可以连同逐页边界清单交给用户征求意见，但不能声明完整验收通过。其他错误不适用该状态，必须先修复。
 
 如果渲染失败，只能报告“内容和结构审计通过，视觉验收未完成”。不得用OOXML检查代替视觉验收，也不得为了继续任务而后台安装`python-pptx`或其他依赖。
 

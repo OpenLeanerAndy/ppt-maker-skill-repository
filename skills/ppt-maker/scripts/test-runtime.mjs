@@ -151,6 +151,43 @@ const pageSplitAudit = auditDeckSpec(unauthorizedPageSplit);
 assert.equal(pageSplitAudit.ok, false, "同一内容组被无依据拆页必须失败");
 assert(pageSplitAudit.errors.some((message) => message.includes("默认应保持单页")), "错误应指出内容组被无依据拆页");
 
+const pendingCapacityDecision = structuredClone(validDeck);
+pendingCapacityDecision.sourceManifest.contentGroups[1].capacityStatus = "warning-pending";
+pendingCapacityDecision.sourceManifest.contentGroups[1].capacityEvidence = {
+  singlePageAttempts: [
+    { strategy: "table-full-row", result: "still-overflow" },
+    { strategy: "rows-three-column", result: "still-overflow" },
+  ],
+};
+const pendingAudit = auditDeckSpec(pendingCapacityDecision);
+assert.equal(pendingAudit.ok, false, "等待用户决定是否拆页时不得开始生成");
+assert(pendingAudit.errors.some((message) => message.includes("等待用户决定")), "错误应提示先询问用户");
+
+const approvedOverflow = structuredClone(validDeck);
+approvedOverflow.sourceManifest.contentGroups[1].capacityStatus = "user-confirmed-no-split";
+approvedOverflow.sourceManifest.contentGroups[1].overflowPolicy = "warn-and-proceed";
+approvedOverflow.sourceManifest.contentGroups[1].overflowApprovalRef = "user-keeps-one-slide";
+approvedOverflow.sourceManifest.contentGroups[1].capacityEvidence = {
+  singlePageAttempts: [
+    { strategy: "expand-table-region", result: "still-overflow" },
+    { strategy: "table-full-row", result: "still-overflow" },
+    { strategy: "rows-two-column", result: "still-overflow" },
+    { strategy: "rows-three-column", result: "still-overflow" },
+  ],
+};
+approvedOverflow.slides[2].overflowPolicy = "warn-and-proceed";
+approvedOverflow.slides[2].overflowApprovalRef = "user-keeps-one-slide";
+approvedOverflow.slides[2].table.splitMode = "none";
+const approvedOverflowAudit = auditDeckSpec(approvedOverflow);
+assert.equal(approvedOverflowAudit.ok, true, "用户明确坚持不拆页后，边界预警不应阻断内容审计");
+assert(approvedOverflowAudit.warnings.some((message) => message.includes("用户确认不拆页")), "审计应保留不拆页警告");
+
+const approvedButMissingContent = structuredClone(approvedOverflow);
+approvedButMissingContent.slides[1].modules[0].body = "原文被删减。";
+const approvedMissingAudit = auditDeckSpec(approvedButMissingContent);
+assert.equal(approvedMissingAudit.ok, false, "不拆页授权不得豁免内容保真错误");
+assert(approvedMissingAudit.errors.some((message) => message.includes("未原样")), "硬错误仍应指出原文缺失");
+
 const changedQuote = structuredClone(validDeck);
 changedQuote.slides[1].modules[0].body = "保留「原始引号」和12.35精度。";
 const changedQuoteAudit = auditDeckSpec(changedQuote);
@@ -184,6 +221,42 @@ try {
     fs.copyFileSync(output, destination);
   }
 
+  const approvedOverflowInput = path.join(temporary, "approved-overflow.json");
+  const approvedOverflowOutput = path.join(temporary, "approved-overflow.pptx");
+  fs.writeFileSync(approvedOverflowInput, JSON.stringify(approvedOverflow, null, 2), "utf8");
+  const approvedOverflowResult = await buildPptx({ inputPath: approvedOverflowInput, outputPath: approvedOverflowOutput, validate: true });
+  assert.equal(approvedOverflowResult.ok, true, "用户坚持单页时应允许先生成文件");
+  assert.equal(approvedOverflowResult.validation.ok, true, "经授权的边界问题不应变成结构硬错误");
+  assert.equal(approvedOverflowResult.deliveryStatus, "generated-with-boundary-decision-pending", "交付状态应提示边界问题待用户决定");
+  assert(approvedOverflowResult.validation.softBoundaryIssues.length > 0, "应记录实际边界问题");
+
+  const threeWay = structuredClone(validDeck);
+  const threeWayRows = Array.from({ length: 27 }, (_, index) => [String(index + 1), `记录${index + 1}`]);
+  threeWay.sourceManifest.tables[0] = {
+    id: "table-long",
+    bodyRows: 27,
+    logicalColumns: 2,
+    headerRowCount: 1,
+    rowHeaderColumns: 1,
+    headerRowsData: [["序号", "内容"]],
+    bodyRowsData: threeWayRows,
+  };
+  threeWay.slides[2].table = {
+    sourceRef: "table-long",
+    orientation: "source",
+    rowHeaderColumns: 1,
+    headers: ["序号", "内容"],
+    rows: threeWayRows,
+    colWidths: [0.8, 2.2],
+    splitMode: "rows-three-column",
+    splitReason: "单页重排后按正文行拆成三个并列表格。",
+    approvalRef: "outline-approved",
+  };
+  const threeWayInput = path.join(temporary, "three-way.json");
+  fs.writeFileSync(threeWayInput, JSON.stringify(threeWay, null, 2), "utf8");
+  const threeWayResult = await buildPptx({ inputPath: threeWayInput, outputPath: path.join(temporary, "three-way.pptx"), validate: true });
+  assert(threeWayResult.validation.tables >= 3, "三段横向拆表应生成至少三个表格对象");
+
   const tooWide = structuredClone(validDeck);
   const tooWideRows = rows(30, 7);
   const tooWideHeaders = ["序号", "字段A", "字段B", "字段C", "字段D", "字段E", "字段F"];
@@ -196,6 +269,25 @@ try {
     headerRowsData: [tooWideHeaders],
     bodyRowsData: tooWideRows,
   };
+  tooWide.sourceManifest.contentGroups[1] = {
+    ...tooWide.sourceManifest.contentGroups[1],
+    keepTogether: false,
+    allowSlideSplit: true,
+    capacityStatus: "split-approved",
+    splitApprovalRef: "user-approved-pagination",
+    capacityEvidence: {
+      singlePageAttempted: true,
+      requiredHeight: 10,
+      availableHeight: 5.67,
+      singlePageAttempts: [
+        { strategy: "table-full-row", result: "still-overflow" },
+        { strategy: "rows-two-column", result: "unreadable" },
+        { strategy: "rows-three-column", result: "unreadable" },
+      ],
+    },
+  };
+  tooWide.slides[2].splitReason = "单页重排仍无法容纳，用户已同意拆页。";
+  tooWide.slides[2].approvalRef = "user-approved-pagination";
   tooWide.slides[2].table = {
     sourceRef: "table-long",
     orientation: "source",

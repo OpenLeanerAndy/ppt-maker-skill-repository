@@ -175,6 +175,8 @@ function collectDeck(deck) {
       splitReason: String(slide?.splitReason ?? "").trim(),
       approvalRef: String(slide?.approvalRef ?? "").trim(),
       continuationIndex: Number(slide?.continuationIndex),
+      overflowPolicy: String(slide?.overflowPolicy ?? "").trim(),
+      overflowApprovalRef: String(slide?.overflowApprovalRef ?? "").trim(),
     });
     addRefs(slide?.contentGroupRef);
   }
@@ -344,18 +346,49 @@ export function auditDeckSpec(deck, { inputDir = process.cwd() } = {}) {
         }
       }
       const keepTogether = group.keepTogether !== false;
+      const capacityStatus = String(group.capacityStatus ?? "fits");
+      const attempts = group.capacityEvidence?.singlePageAttempts;
+      if (capacityStatus === "warning-pending") {
+        errors.push(`内容组 ${group.id} 的单页重排仍无法容纳，正在等待用户决定是否拆页；此状态不得开始生成。`);
+      }
+      if (["warning-pending", "user-confirmed-no-split", "split-approved"].includes(capacityStatus)
+        && (!Array.isArray(attempts) || attempts.length === 0)) {
+        errors.push(`内容组 ${group.id} 缺少 capacityEvidence.singlePageAttempts；必须记录已经尝试的单页重排方案。`);
+      }
+      if (capacityStatus === "user-confirmed-no-split") {
+        const groupApproval = String(group.overflowApprovalRef ?? "").trim();
+        if (group.overflowPolicy !== "warn-and-proceed" || !groupApproval) {
+          errors.push(`内容组 ${group.id} 坚持不拆页时必须设置 overflowPolicy: "warn-and-proceed" 和 overflowApprovalRef。`);
+        }
+        for (const slide of matches) {
+          if (slide.overflowPolicy !== "warn-and-proceed" || !slide.overflowApprovalRef || slide.overflowApprovalRef !== groupApproval) {
+            errors.push(`${slide.location} 必须继承内容组 ${group.id} 的 warn-and-proceed 和 overflowApprovalRef。`);
+          }
+        }
+        warnings.push(`内容组 ${group.id} 已由用户确认不拆页；生成后仅边界越界可作为待用户决定项，其他错误仍为硬错误。`);
+      } else {
+        for (const slide of matches) {
+          if (slide.overflowPolicy === "warn-and-proceed") {
+            errors.push(`${slide.location} 使用 warn-and-proceed，但内容组 ${group.id} 未记录 user-confirmed-no-split。`);
+          }
+        }
+      }
       if (matches.length > 1 && (keepTogether || group.allowSlideSplit !== true)) {
         errors.push(`内容组 ${group.id} 默认应保持单页，却被拆成 ${matches.length} 页；必须先证明单页无法容纳并获得用户确认。`);
       }
-      if (matches.length > 1 && group.allowSlideSplit === true) {
+      if (group.allowSlideSplit === true) {
         const evidence = group.capacityEvidence;
         if (!evidence || evidence.singlePageAttempted !== true || !Number.isFinite(Number(evidence.requiredHeight)) || !Number.isFinite(Number(evidence.availableHeight)) || Number(evidence.requiredHeight) <= Number(evidence.availableHeight)) {
           errors.push(`内容组 ${group.id} 缺少有效 capacityEvidence；拆页前必须证明单页所需高度大于可用高度。`);
         }
+        if (!String(group.splitApprovalRef ?? "").trim()) errors.push(`内容组 ${group.id} 已允许拆页，但缺少 splitApprovalRef。`);
         matches.forEach((slide, index) => {
           if (!slide.splitReason || !slide.approvalRef) errors.push(`${slide.location} 属于拆分内容组 ${group.id}，但缺少 splitReason 或 approvalRef。`);
-          if (slide.continuationIndex !== index + 1) errors.push(`${slide.location} 的 continuationIndex 应为 ${index + 1}。`);
+          if (matches.length > 1 && slide.continuationIndex !== index + 1) errors.push(`${slide.location} 的 continuationIndex 应为 ${index + 1}。`);
         });
+      }
+      if (group.allowSlideSplit === true && capacityStatus !== "split-approved") {
+        errors.push(`内容组 ${group.id} 已允许拆页，但 capacityStatus 不是 split-approved。`);
       }
     }
     const ordered = contentSlides
