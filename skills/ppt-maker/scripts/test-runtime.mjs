@@ -4,13 +4,23 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildPptx } from "./build-pptx.mjs";
+import { buildPptx, CONTENT_LOGO_PLACEMENT, expandOversizedTableSlides } from "./build-pptx.mjs";
 import { auditDeckSpec } from "./lib/deck-audit.mjs";
 
 function rows(count, columns) {
   return Array.from({ length: count }, (_, row) => Array.from({ length: columns }, (_, column) => (
     column === 0 ? String(row + 1) : `第${row + 1}行第${column + 1}列内容`
   )));
+}
+
+function outlinePagesFromSlides(slides) {
+  return slides.map((slide) => ({
+    type: String(slide.type ?? "content").toLowerCase(),
+    title: String(slide.title ?? slide.heading ?? ""),
+    contentGroupRef: String(slide.contentGroupRef ?? ""),
+    layoutFlow: String(slide.layoutFlow ?? ""),
+    moduleTitles: (slide.modules ?? []).map((module) => String(module.title ?? "")),
+  }));
 }
 
 function testDeck() {
@@ -45,6 +55,16 @@ function testDeck() {
         { id: "group-fidelity", sourceOrder: 1, keepTogether: true, preferredFlow: "multi-column" },
         { id: "group-table", sourceOrder: 2, keepTogether: true, preferredFlow: "full-table" },
       ],
+    },
+    confirmedOutline: {
+      initialApprovalRef: "outline-approved",
+      initialPages: [
+        { type: "title", title: "通用长表布局测试", moduleTitles: [] },
+        { type: "content", title: "原文保真", contentGroupRef: "group-fidelity", layoutFlow: "multi-column", moduleTitles: ["规则", "结构化表达"] },
+        { type: "table", title: "长表自动拆分", contentGroupRef: "group-table", layoutFlow: "full-table", moduleTitles: [] },
+        { type: "closing", title: "测试完成", moduleTitles: [] },
+      ],
+      revisions: [],
     },
     slides: [
       { type: "title", title: "通用长表布局测试" },
@@ -99,9 +119,35 @@ function testDeck() {
 
 const validDeck = testDeck();
 assert.equal(auditDeckSpec(validDeck).ok, true, "完整清单应通过审计");
+assert.equal(CONTENT_LOGO_PLACEMENT.top, 1 / 2.54, "Logo顶部边距应为1厘米");
+assert.equal(CONTENT_LOGO_PLACEMENT.right, 1 / 2.54, "Logo右侧边距应为1厘米");
+assert.equal(CONTENT_LOGO_PLACEMENT.w, 1.55, "Logo宽度应沿用原内容页尺寸");
+assert.equal(CONTENT_LOGO_PLACEMENT.h, 0.52, "Logo高度应沿用原内容页尺寸");
+
+const missingConfirmedOutline = structuredClone(validDeck);
+delete missingConfirmedOutline.confirmedOutline;
+const missingOutlineAudit = auditDeckSpec(missingConfirmedOutline);
+assert.equal(missingOutlineAudit.ok, false, "缺少用户确认大纲时必须失败");
+assert(missingOutlineAudit.errors.some((message) => message.includes("confirmedOutline")), "错误应指出缺少确认大纲");
+
+const unauthorizedOutlineChange = structuredClone(validDeck);
+unauthorizedOutlineChange.slides[1].title = "系统自行修改的标题";
+const unauthorizedOutlineAudit = auditDeckSpec(unauthorizedOutlineChange);
+assert.equal(unauthorizedOutlineAudit.ok, false, "未经用户授权修改页面结构必须失败");
+assert(unauthorizedOutlineAudit.errors.some((message) => message.includes("有效确认大纲")), "错误应指出与有效确认大纲不一致");
+
+const authorizedOutlineChange = structuredClone(unauthorizedOutlineChange);
+const revisedPages = structuredClone(authorizedOutlineChange.confirmedOutline.initialPages);
+revisedPages[1].title = "系统自行修改的标题";
+authorizedOutlineChange.confirmedOutline.revisions.push({
+  instructionRef: "user-requested-title-change",
+  effectivePages: revisedPages,
+});
+assert.equal(auditDeckSpec(authorizedOutlineChange).ok, true, "用户明确提出并记录的结构修改应更新有效大纲");
 
 const pureTextPage = structuredClone(validDeck);
 pureTextPage.slides[1].modules = [pureTextPage.slides[1].modules[0]];
+pureTextPage.confirmedOutline.initialPages[1].moduleTitles = ["规则"];
 const pureTextAudit = auditDeckSpec(pureTextPage);
 assert.equal(pureTextAudit.ok, false, "没有结构化证据的内容页必须失败");
 assert(pureTextAudit.errors.some((message) => message.includes("只有正文/项目符号")), "错误应指出缺少结构化证据");
@@ -113,6 +159,7 @@ labeledList.slides[1].modules[1] = {
   title: "行动计划",
   bullets: ["任务A：完成方案", "任务B：组织评审", "任务C：提交成果"],
 };
+labeledList.confirmedOutline.initialPages[1].moduleTitles[1] = "行动计划";
 const labeledListAudit = auditDeckSpec(labeledList);
 assert.equal(labeledListAudit.ok, false, "多项标签说明不得退化为项目符号");
 assert(labeledListAudit.errors.some((message) => message.includes("标签：说明")), "错误应建议使用matrix或table");
@@ -299,6 +346,10 @@ try {
     splitReason: "七列长表在单页无法保持10号字完整显示。",
     approvalRef: "outline-approved",
   };
+  tooWide.confirmedOutline.revisions.push({
+    instructionRef: "user-approved-pagination",
+    effectivePages: outlinePagesFromSlides(expandOversizedTableSlides(tooWide.slides)),
+  });
   const tooWideInput = path.join(temporary, "too-wide.json");
   fs.writeFileSync(tooWideInput, JSON.stringify(tooWide, null, 2), "utf8");
   const tooWideResult = await buildPptx({ inputPath: tooWideInput, outputPath: path.join(temporary, "too-wide.pptx"), validate: true });

@@ -18,6 +18,13 @@ import { validatePptx } from "./validate-pptx.mjs";
 
 const SLIDE_W = 13.333;
 const SLIDE_H = 7.5;
+const ONE_CENTIMETER = 1 / 2.54;
+export const CONTENT_LOGO_PLACEMENT = Object.freeze({
+  top: ONE_CENTIMETER,
+  right: ONE_CENTIMETER,
+  w: 1.55,
+  h: 0.52,
+});
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
 const ALLOWED_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif"]);
 const BODY_FONT_SIZE = 10;
@@ -164,10 +171,19 @@ function addImageContained(slide, filePath, box, altText = "") {
   slide.addImage(validatedImageOptions(filePath, box, altText));
 }
 
+function validatedTopRightImageOptions(filePath, placement, altText) {
+  const fitted = validatedImageOptions(filePath, { x: 0, y: 0, w: placement.w, h: placement.h }, altText);
+  return {
+    ...fitted,
+    x: SLIDE_W - placement.right - fitted.w,
+    y: placement.top,
+  };
+}
+
 function defineLogoMasters(context) {
   const base = { background: { color: context.theme.colors.white }, margin: 0 };
   const contentObjects = context.logo
-    ? [{ image: validatedImageOptions(context.logo, { x: 11.25, y: 0.18, w: 1.55, h: 0.52 }, "Logo") }]
+    ? [{ image: validatedTopRightImageOptions(context.logo, CONTENT_LOGO_PLACEMENT, "Logo") }]
     : [];
   const titleObjects = context.logo
     ? [{ image: validatedImageOptions(context.logo, { x: 9.9, y: 0.45, w: 2.75, h: 0.9 }, "Logo") }]
@@ -1009,7 +1025,7 @@ function paginateTableRows(block, box) {
   return chunks;
 }
 
-function expandOversizedTableSlides(slides) {
+export function expandOversizedTableSlides(slides) {
   const expanded = [];
   for (const spec of slides) {
     const type = String(spec.type ?? "content").toLowerCase();
@@ -1083,7 +1099,8 @@ export async function buildPptx({ inputPath, outputPath, validate = true }) {
   const deck = JSON.parse(fs.readFileSync(absoluteInput, "utf8"));
   validateDeckSpec(deck);
   const inputDir = path.dirname(absoluteInput);
-  const audit = auditDeckSpec(deck, { inputDir });
+  const slideSpecs = expandOversizedTableSlides(deck.slides);
+  const audit = auditDeckSpec({ ...deck, slides: slideSpecs }, { inputDir });
   if (!audit.ok) {
     throw new Error(`内容保真审计失败：${audit.errors.join("；")}`);
   }
@@ -1113,7 +1130,6 @@ export async function buildPptx({ inputPath, outputPath, validate = true }) {
   if (context.logo) requireLocalAsset(context.logo, "Logo");
   defineLogoMasters(context);
 
-  const slideSpecs = expandOversizedTableSlides(deck.slides);
   const allowedOverflowSlides = [];
   slideSpecs.forEach((spec, index) => {
     const pageNumber = index + 1;

@@ -23,6 +23,82 @@ function canonicalRows(rows) {
   }))));
 }
 
+function effectiveConfirmedOutline(deck, errors) {
+  const outline = deck?.confirmedOutline;
+  if (!outline || typeof outline !== "object" || Array.isArray(outline)) {
+    errors.push("缺少 confirmedOutline；无法核对最终页面结构是否符合用户确认的大纲。");
+    return [];
+  }
+  if (!String(outline.initialApprovalRef ?? "").trim()) {
+    errors.push("confirmedOutline.initialApprovalRef 不能为空；必须记录用户最初确认大纲的依据。");
+  }
+
+  function validateSnapshot(pages, location) {
+    if (!Array.isArray(pages) || pages.length === 0) {
+      errors.push(`${location} 必须是非空页面结构数组。`);
+      return [];
+    }
+    pages.forEach((page, index) => {
+      const pageLocation = `${location}[${index}]`;
+      if (!String(page?.type ?? "").trim()) errors.push(`${pageLocation} 缺少 type。`);
+      if (!String(page?.title ?? "").trim()) errors.push(`${pageLocation} 缺少 title。`);
+      if (!Array.isArray(page?.moduleTitles)) errors.push(`${pageLocation}.moduleTitles 必须是数组；没有模块时使用空数组。`);
+      const type = String(page?.type ?? "").toLowerCase();
+      if (["content", "table"].includes(type)) {
+        if (!String(page?.contentGroupRef ?? "").trim()) errors.push(`${pageLocation} 缺少 contentGroupRef。`);
+        if (!String(page?.layoutFlow ?? "").trim()) errors.push(`${pageLocation} 缺少 layoutFlow。`);
+      }
+    });
+    return pages;
+  }
+
+  let pages = validateSnapshot(outline.initialPages, "confirmedOutline.initialPages");
+  if (outline.revisions !== undefined && !Array.isArray(outline.revisions)) {
+    errors.push("confirmedOutline.revisions 必须是数组。");
+    return pages;
+  }
+  for (const [index, revision] of (outline.revisions ?? []).entries()) {
+    const location = `confirmedOutline.revisions[${index}]`;
+    if (!String(revision?.instructionRef ?? "").trim()) {
+      errors.push(`${location}.instructionRef 不能为空；只有用户明确提出的修改才能改变已确认大纲。`);
+    }
+    pages = validateSnapshot(revision?.effectivePages, `${location}.effectivePages`);
+  }
+  return pages;
+}
+
+function auditConfirmedOutline(deck, collected, errors) {
+  const expectedPages = effectiveConfirmedOutline(deck, errors);
+  if (expectedPages.length === 0) return 0;
+  const actualPages = collected.slideStructures;
+  if (actualPages.length !== expectedPages.length) {
+    errors.push(`最终页面数量与有效确认大纲不一致：大纲 ${expectedPages.length} 页，当前 ${actualPages.length} 页。`);
+  }
+  const compared = Math.min(expectedPages.length, actualPages.length);
+  for (let index = 0; index < compared; index += 1) {
+    const expected = expectedPages[index] ?? {};
+    const actual = actualPages[index] ?? {};
+    const pageNumber = index + 1;
+    const comparisons = [
+      ["页面类型", String(expected.type ?? "").toLowerCase(), actual.type],
+      ["标题", normalizeText(expected.title), normalizeText(actual.title)],
+      ["内容组", String(expected.contentGroupRef ?? "").trim(), actual.contentGroupRef],
+      ["阅读流", String(expected.layoutFlow ?? "").trim(), actual.layoutFlow],
+    ];
+    for (const [label, expectedValue, actualValue] of comparisons) {
+      if (expectedValue !== actualValue) {
+        errors.push(`第 ${pageNumber} 页${label}与有效确认大纲不一致：大纲“${expectedValue}”，当前“${actualValue}”。`);
+      }
+    }
+    const expectedModules = (expected.moduleTitles ?? []).map(normalizeText);
+    const actualModules = (actual.moduleTitles ?? []).map(normalizeText);
+    if (JSON.stringify(expectedModules) !== JSON.stringify(actualModules)) {
+      errors.push(`第 ${pageNumber} 页模块数量、顺序或标题与有效确认大纲不一致。`);
+    }
+  }
+  return expectedPages.length;
+}
+
 function collectDeck(deck) {
   const text = [];
   const refs = new Set();
@@ -139,6 +215,7 @@ function collectDeck(deck) {
       layoutFlow: String(slide?.layoutFlow ?? "").trim(),
       columns: Number.isInteger(slide?.columns) ? slide.columns : 1,
       moduleCount: Array.isArray(slide?.modules) ? slide.modules.length : 0,
+      moduleTitles: (slide?.modules ?? []).map((module) => String(module?.title ?? "")),
       splitReason: String(slide?.splitReason ?? "").trim(),
       approvalRef: String(slide?.approvalRef ?? "").trim(),
       continuationIndex: Number(slide?.continuationIndex),
@@ -194,6 +271,7 @@ export function auditDeckSpec(deck, { inputDir = process.cwd() } = {}) {
   }
 
   const collected = collectDeck(deck);
+  const confirmedOutlinePages = auditConfirmedOutline(deck, collected, errors);
   const deckText = normalizeText(collected.text);
   const auditableSlides = collected.slideStructures.filter((slide) => slide.type === "content" || slide.type === "table");
   if (auditableSlides.length > 0 && (!Array.isArray(manifest.contentGroups) || manifest.contentGroups.length === 0)) {
@@ -435,6 +513,7 @@ export function auditDeckSpec(deck, { inputDir = process.cwd() } = {}) {
       tables: manifest.tables?.length ?? 0,
       media: manifest.media?.length ?? 0,
       contentGroups: manifest.contentGroups?.length ?? 0,
+      confirmedOutlinePages,
       discoveredTableBlocks: collected.tables.length,
       discoveredImageBlocks: collected.images.length,
       structuredSlides: collected.slideStructures.filter((slide) => slide.types.some((type) => structuredTypes.has(type))).length,

@@ -47,6 +47,19 @@
       {"id": "group-plan", "sourceOrder": 3, "keepTogether": true, "preferredFlow": "full-table"}
     ]
   },
+  "confirmedOutline": {
+    "initialApprovalRef": "example-outline-approved",
+    "initialPages": [
+      {"type": "title", "title": "PptxGenJS 脚本能力验证", "moduleTitles": []},
+      {"type": "agenda", "title": "目录", "moduleTitles": []},
+      {"type": "section", "title": "目录", "moduleTitles": []},
+      {"type": "content", "title": "方案概览", "contentGroupRef": "group-overview", "layoutFlow": "multi-column", "moduleTitles": ["输入", "处理", "输出"]},
+      {"type": "content", "title": "关键指标", "contentGroupRef": "group-metrics", "layoutFlow": "multi-column", "moduleTitles": ["季度完成量", "图片等比适配"]},
+      {"type": "table", "title": "实施计划", "contentGroupRef": "group-plan", "layoutFlow": "full-table", "moduleTitles": []},
+      {"type": "closing", "title": "谢谢", "moduleTitles": []}
+    ],
+    "revisions": []
+  },
   "agenda": [
     {"title": "方案概览", "sourceRef": "section-overview"},
     {"title": "关键指标", "sourceRef": "section-metrics"},

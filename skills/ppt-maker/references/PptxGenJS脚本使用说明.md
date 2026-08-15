@@ -62,6 +62,7 @@ node scripts/validate-pptx.mjs output/example.pptx --expected-slides 7
 | `title` | 是 | 演示文稿总标题，也是未指定输出路径时的默认文件名。 |
 | `slides` | 是 | 非空页面数组，按数组顺序生成。 |
 | `sourceManifest` | 是 | 源文件、必需文字、表格和媒体清单，用于生成前保真审计。 |
+| `confirmedOutline` | 是 | 用户确认的大纲快照及后续明确修改记录，用于核对最终页面结构。 |
 | `department` | 否 | 标题页部门或汇报单位。 |
 | `date` | 否 | 标题页日期。 |
 | `author`、`company`、`subject` | 否 | 写入 PPTX 文档属性。 |
@@ -100,6 +101,31 @@ node scripts/validate-pptx.mjs output/example.pptx --expected-slides 7
 ```
 
 目录项、页面、模块或内容块使用`sourceRef`或`sourceRefs`引用清单条目。内容页还必须使用`contentGroupRef`和`layoutFlow`声明语义组及阅读流。默认条目均为必需项；经用户确认可以省略时写入非空`omittedReason`。审计会拒绝：一级标题缺失、必需文字被改写、表格多级表头/二维矩阵/行列方向不符、未经确认分栏或拆页、必需媒体未使用、源文件不存在或SHA-256不一致。
+
+## `confirmedOutline`
+
+```json
+{
+  "confirmedOutline": {
+    "initialApprovalRef": "用户最初确认大纲的消息或记录",
+    "initialPages": [
+      {"type":"title","title":"汇报标题","moduleTitles":[]},
+      {"type":"content","title":"工作进展","contentGroupRef":"group-1","layoutFlow":"single-column","moduleTitles":["总体情况","工作明细"]}
+    ],
+    "revisions": [
+      {
+        "instructionRef": "用户后续明确提出结构修改的消息或记录",
+        "effectivePages": [
+          {"type":"title","title":"汇报标题","moduleTitles":[]},
+          {"type":"content","title":"最新工作进展","contentGroupRef":"group-1","layoutFlow":"single-column","moduleTitles":["总体情况","工作明细"]}
+        ]
+      }
+    ]
+  }
+}
+```
+
+`initialPages`必须完整记录用户最初确认的全部页面；没有后续修改时使用空`revisions`数组。只有用户在任务中明确提出结构修改时才能新增revision，每个`effectivePages`都保存修改后的完整有效大纲。每页必须填写`type`、`title`和`moduleTitles`；内容页和表格页还必须填写`contentGroupRef`及`layoutFlow`。审计逐页比较页面数量、顺序、类型、标题、内容组、阅读流和模块标题，拒绝未经用户授权的结构变化。
 
 ## 页面类型
 
