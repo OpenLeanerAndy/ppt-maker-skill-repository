@@ -34,28 +34,23 @@ node scripts/preflight.mjs --probe-renderer
 
 2. 复制 `scripts/example-deck.json`，按照已确认的大纲和`sourceManifest`填充内容。禁止把正文拼接进临时Python/JavaScript源码；必须直接编辑或序列化UTF-8 JSON。
 
-3. 生成前执行内容保真审计：
-
-```bash
-node scripts/audit-deck.mjs --input scripts/example-deck.json
-```
-
-4. 审计通过后生成 PPTX：
+3. 生成 PPTX。构建器会先执行内容保真审计，写入文件后自动执行结构校验；任一检查失败都会以非零状态退出：
 
 ```bash
 node scripts/build-pptx.mjs --input scripts/example-deck.json --output output/example.pptx
 ```
 
-5. 单独执行结构校验：
-
-```bash
-node scripts/validate-pptx.mjs output/example.pptx --expected-slides 7
-```
-
-6. 将全部页面渲染为PNG；输出目录必须为空：
+4. 将全部页面渲染为PNG；输出目录必须为空：
 
 ```bash
 node scripts/render-pptx.mjs --input output/example.pptx --output output/rendered
+```
+
+`audit-deck.mjs`和`validate-pptx.mjs`保留为诊断入口，仅在需要单独定位输入或成品问题时运行，标准生成流程不重复执行：
+
+```bash
+node scripts/audit-deck.mjs --input scripts/example-deck.json
+node scripts/validate-pptx.mjs output/example.pptx --expected-slides 7
 ```
 
 上述脚本均支持 `--json`，用于让 Agent 获取结构化执行结果。`build-pptx.mjs` 默认会自动运行结构校验；只有诊断场景才应使用 `--no-validate`。
@@ -179,15 +174,12 @@ node scripts/render-pptx.mjs --input output/example.pptx --output output/rendere
 - 单行表头使用`headers`；多级表头使用`headerRows`。
 - 单元格可以是字符串，也可以是`{"text":"标题","rowspan":2,"colspan":1}`。
 - `colWidths`必须与逻辑列数一致。脚本会核对每个正文行的逻辑列数，禁止通过少写第一列或其他字段来适配页面。
-- 脚本按列宽、文字长度、10号字和1.3倍行距估算行高。超高表格默认`splitMode: "none"`并报错，禁止生成阶段自动决定拆分。
-- 只有大纲已确认拆分时，才能同时提供非空`splitReason`和`approvalRef`，并选择：
+- 脚本按列宽、文字长度、10号字和1.3倍行距估算行高。超高表格默认`splitMode: "none"`并报错；容量评估、预警及用户授权状态统一按[内容保真与验收.md](./内容保真与验收.md#5-容量和拆分)填写。
+- 大纲已确认拆分并提供非空`splitReason`和`approvalRef`后，可选择：
   - `splitMode: "rows-two-column"`：按正文行拆成左右两个表，重复完整多级表头和全部逻辑列；兼容旧值`columns`。
   - `splitMode: "rows-three-column"`：按正文行拆成三个左右并列表格，适合逻辑列少、横向缩窄后仍可读的长表。
   - `splitMode: "paginate"`：仅用于独立表格页，按正文行生成连续页。
-- 每个表格块必须声明`orientation: "source"`和`rowHeaderColumns`。不得使用转置或拆列解决容量问题。
-- 使用分页前，先在大纲阶段依次尝试扩大表格区域、让表格独占一行、调整上下复合布局以及2—3段同页横向拆表，再把更新后的大纲交给用户确认。
-- 单页方案仍不够时，设置`capacityStatus: "warning-pending"`并暂停生成，询问用户是否拆页。
-- 用户坚持不拆页时，内容组和页面同时设置`overflowPolicy: "warn-and-proceed"`与相同的`overflowApprovalRef`。脚本允许先生成，但只把对象或表格边界问题记为警告；删除数据、缺失图表、表格结构变化等仍然报错。
+- 每个表格块必须声明`orientation: "source"`和`rowHeaderColumns`。不得使用转置或拆列解决容量问题。`warning-pending`会阻止生成；有效的`warn-and-proceed`仅把边界问题降为警告。
 
 内容页默认按模块内容量分配行列尺寸。需要精确复合布局时，可给每个模块提供归一化`layout: {"x":0,"y":0,"w":0.6,"h":1}`；所有模块必须位于0–1的内容区域内且不得重叠。
 
@@ -213,4 +205,4 @@ node scripts/render-pptx.mjs --input output/example.pptx --output output/rendere
 
 ## 依赖安全说明
 
-截至 2026-08-14，PptxGenJS 4.0.1 间接依赖的 `image-size` 对 ICNS、JXL 和 HEIF 解析存在拒绝服务公告，npm 尚未提供已修复版本。当前脚本不接受这些格式，只允许 25 MB 内、文件签名有效的 PNG、JPEG 和 GIF，从调用路径上避免触发受影响的解析器。不要删除或绕过 `addImageContained` 中的格式、大小和文件签名检查。公告详情见 [GHSA-w3rx-r6r6-pgpr](https://github.com/advisories/GHSA-w3rx-r6r6-pgpr) 与 [GHSA-5p2g-fcmc-qvqq](https://github.com/advisories/GHSA-5p2g-fcmc-qvqq)。
+不要删除或绕过`addImageContained`中的格式、大小和文件签名检查；依赖公告和维护说明统一记录在仓库根目录的`SECURITY.md`。

@@ -1,26 +1,18 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import {
+  cellColspan,
+  cellRowspan,
+  cellText,
+  logicalColumns,
+  normalizeBlocks,
+  tableColumns,
+  tableHeaderRows,
+} from "./deck-model.mjs";
 
 function normalizeText(value) {
   return String(value ?? "").replace(/\s+/g, "");
-}
-
-function cellText(cell) {
-  if (cell && typeof cell === "object" && !Array.isArray(cell)) return String(cell.text ?? "");
-  return String(cell ?? "");
-}
-
-function cellColspan(cell) {
-  if (!cell || typeof cell !== "object" || Array.isArray(cell)) return 1;
-  const value = Number(cell.colspan ?? cell.options?.colspan ?? 1);
-  return Number.isInteger(value) && value > 0 ? value : 1;
-}
-
-function cellRowspan(cell) {
-  if (!cell || typeof cell !== "object" || Array.isArray(cell)) return 1;
-  const value = Number(cell.rowspan ?? cell.options?.rowspan ?? 1);
-  return Number.isInteger(value) && value > 0 ? value : 1;
 }
 
 function canonicalRows(rows) {
@@ -29,20 +21,6 @@ function canonicalRows(rows) {
     colspan: cellColspan(cell),
     rowspan: cellRowspan(cell),
   }))));
-}
-
-function logicalColumns(row) {
-  return Array.isArray(row) ? row.reduce((sum, cell) => sum + cellColspan(cell), 0) : 0;
-}
-
-function tableHeaderRows(table) {
-  if (Array.isArray(table?.headerRows) && table.headerRows.length > 0) return table.headerRows;
-  return Array.isArray(table?.headers) ? [table.headers] : [];
-}
-
-function tableColumns(table) {
-  const rows = [...tableHeaderRows(table), ...(Array.isArray(table?.rows) ? table.rows : [])];
-  return rows.reduce((maximum, row) => Math.max(maximum, logicalColumns(row)), 0);
 }
 
 function collectDeck(deck) {
@@ -132,18 +110,7 @@ function collectDeck(deck) {
       addRefs(module?.sourceRef);
       addRefs(module?.sourceRefs);
       text.push(String(module?.title ?? ""), String(module?.body ?? ""));
-      const blocks = Array.isArray(module?.blocks) && module.blocks.length > 0
-        ? module.blocks
-        : [
-          ...(module?.body ? [{ type: "text", text: module.body }] : []),
-          ...(module?.bullets?.length ? [{ type: "bullets", items: module.bullets }] : []),
-          ...(module?.metrics?.length ? [{ type: "metrics", items: module.metrics }] : []),
-          ...(module?.matrix ? [{ type: "matrix", ...(Array.isArray(module.matrix) ? { items: module.matrix } : module.matrix) }] : []),
-          ...(module?.callout ? [{ type: "callout", ...(typeof module.callout === "string" ? { text: module.callout } : module.callout) }] : []),
-          ...(module?.table ? [{ type: "table", ...module.table }] : []),
-          ...(module?.chart ? [{ type: "chart", ...module.chart }] : []),
-          ...(module?.image ? [{ type: "image", ...(typeof module.image === "string" ? { path: module.image } : module.image) }] : []),
-        ];
+      const blocks = normalizeBlocks(module);
       const moduleTypes = new Set();
       for (const [blockIndex, block] of blocks.entries()) {
         visitBlock(block, `${moduleLocation}.blocks[${blockIndex}]`, moduleTypes);
@@ -276,9 +243,9 @@ export function auditDeckSpec(deck, { inputDir = process.cwd() } = {}) {
       errors.push(`必需表格 ${expected.id} 没有对应的 table 内容块。`);
       continue;
     }
-    const expectedRows = Number.isInteger(expected.bodyRows) ? expected.bodyRows : expected.rows;
-    const expectedColumns = Number.isInteger(expected.logicalColumns) ? expected.logicalColumns : expected.columns;
-    const expectedHeaderRows = Number.isInteger(expected.headerRowCount) ? expected.headerRowCount : expected.headerRows;
+    const expectedRows = expected.bodyRows;
+    const expectedColumns = expected.logicalColumns;
+    const expectedHeaderRows = expected.headerRowCount;
     for (const field of ["bodyRows", "logicalColumns", "headerRowCount", "rowHeaderColumns", "headerRowsData", "bodyRowsData"]) {
       if (expected[field] === undefined) errors.push(`表格 ${expected.id} 的 sourceManifest 缺少 ${field}，无法检出转置、表头吞并或单元格丢失。`);
     }
@@ -429,24 +396,21 @@ export function auditDeckSpec(deck, { inputDir = process.cwd() } = {}) {
   }
 
   const structuredTypes = new Set(["metrics", "matrix", "table", "chart", "image", "callout"]);
-  const requireStructuredEvidence = true;
-  if (requireStructuredEvidence) {
-    for (const slide of collected.slideStructures) {
-      if (slide.type !== "content") continue;
-      const hasStructuredEvidence = slide.types.some((type) => structuredTypes.has(type));
-      if (!hasStructuredEvidence && !slide.visualExemptionReason) {
-        errors.push(`${slide.location}“${slide.title}”只有正文/项目符号，没有结构化证据；请使用指标、表格、图表、图片、事项矩阵或提示块，纯叙述页则填写 visualExemptionReason。`);
-      }
+  for (const slide of collected.slideStructures) {
+    if (slide.type !== "content") continue;
+    const hasStructuredEvidence = slide.types.some((type) => structuredTypes.has(type));
+    if (!hasStructuredEvidence && !slide.visualExemptionReason) {
+      errors.push(`${slide.location}“${slide.title}”只有正文/项目符号，没有结构化证据；请使用指标、表格、图表、图片、事项矩阵或提示块，纯叙述页则填写 visualExemptionReason。`);
     }
-    for (const module of collected.moduleStructures) {
-      const hasStructuredEvidence = module.types.some((type) => structuredTypes.has(type));
-      if (hasStructuredEvidence || module.plainListReason) continue;
-      const labeledItems = module.bulletItems.filter((item) => /[^：:\s]{1,20}[：:]/.test(item));
-      if (module.bulletItems.length >= 3 && labeledItems.length >= 2) {
-        errors.push(`${module.location}“${module.title}”包含多项“标签：说明”，不得退化为项目符号；请使用 matrix 或 table，确为同质叙述时填写 plainListReason。`);
-      } else if (module.bulletItems.length >= 6) {
-        errors.push(`${module.location}“${module.title}”包含 ${module.bulletItems.length} 条纯文字列表；请评估 matrix、table 或分页，确为同质叙述时填写 plainListReason。`);
-      }
+  }
+  for (const module of collected.moduleStructures) {
+    const hasStructuredEvidence = module.types.some((type) => structuredTypes.has(type));
+    if (hasStructuredEvidence || module.plainListReason) continue;
+    const labeledItems = module.bulletItems.filter((item) => /[^：:\s]{1,20}[：:]/.test(item));
+    if (module.bulletItems.length >= 3 && labeledItems.length >= 2) {
+      errors.push(`${module.location}“${module.title}”包含多项“标签：说明”，不得退化为项目符号；请使用 matrix 或 table，确为同质叙述时填写 plainListReason。`);
+    } else if (module.bulletItems.length >= 6) {
+      errors.push(`${module.location}“${module.title}”包含 ${module.bulletItems.length} 条纯文字列表；请评估 matrix、table 或分页，确为同质叙述时填写 plainListReason。`);
     }
   }
 
@@ -477,5 +441,3 @@ export function auditDeckSpec(deck, { inputDir = process.cwd() } = {}) {
     },
   };
 }
-
-export const tableModel = { cellText, logicalColumns, tableColumns, tableHeaderRows };

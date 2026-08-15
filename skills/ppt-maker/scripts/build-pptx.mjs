@@ -4,7 +4,15 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { auditDeckSpec, tableModel } from "./lib/deck-audit.mjs";
+import { auditDeckSpec } from "./lib/deck-audit.mjs";
+import {
+  cellColspan,
+  cellText,
+  logicalColumns,
+  normalizeBlocks,
+  tableColumns,
+  tableHeaderRows,
+} from "./lib/deck-model.mjs";
 import { loadPptxGenJS, skillDir } from "./lib/pptxgen-loader.mjs";
 import { validatePptx } from "./validate-pptx.mjs";
 
@@ -91,7 +99,6 @@ function requireLocalAsset(assetPath, label) {
 }
 
 function imageDimensions(filePath) {
-  if (/^https?:\/\//i.test(filePath)) return null;
   const buffer = fs.readFileSync(filePath);
   if (buffer.length >= 24 && buffer.toString("ascii", 1, 4) === "PNG") {
     return { format: "png", width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
@@ -157,14 +164,6 @@ function addImageContained(slide, filePath, box, altText = "") {
   slide.addImage(validatedImageOptions(filePath, box, altText));
 }
 
-function addLogo(slide, context, mode = "content") {
-  if (!context.logo || context.logoOnMaster) return;
-  const box = mode === "title"
-    ? { x: 9.9, y: 0.45, w: 2.75, h: 0.9 }
-    : { x: 11.25, y: 0.18, w: 1.55, h: 0.52 };
-  addImageContained(slide, context.logo, box, "Logo");
-}
-
 function defineLogoMasters(context) {
   const base = { background: { color: context.theme.colors.white }, margin: 0 };
   const contentObjects = context.logo
@@ -175,7 +174,6 @@ function defineLogoMasters(context) {
     : [];
   context.pptx.defineSlideMaster({ ...base, title: "PPT_MAKER_CONTENT", objects: contentObjects });
   context.pptx.defineSlideMaster({ ...base, title: "PPT_MAKER_TITLE", objects: titleObjects });
-  context.logoOnMaster = Boolean(context.logo);
 }
 
 function addPageNumber(slide, context, pageNumber) {
@@ -214,14 +212,12 @@ function addHeader(slide, context, title, pageNumber) {
     h: 0,
     line: { color: colors.secondary, width: 1.25 },
   });
-  addLogo(slide, context, "content");
   addPageNumber(slide, context, pageNumber);
 }
 
 function addTitleSlide(slide, context, spec) {
   const { colors, fontFace } = context.theme;
   slide.background = { color: colors.white };
-  addLogo(slide, context, "title");
   slide.addShape(context.pptx.ShapeType.line, {
     x: 1.65, y: 2.02, w: 0, h: 3.05,
     line: { color: colors.primary, width: 1.5 },
@@ -266,7 +262,6 @@ function addAgendaSlide(slide, context, spec, pageNumber, isSection = false) {
     x: 10.92, y: 1.13, w: 1.15, h: 0,
     line: { color: colors.secondary, width: 2 },
   });
-  addLogo(slide, context, "content");
   const items = agendaItems(spec, context);
   if (items.length === 0 && isSection) {
     slide.addText(spec.title || "章节", {
@@ -297,20 +292,6 @@ function addAgendaSlide(slide, context, spec, pageNumber, isSection = false) {
     });
   }
   addPageNumber(slide, context, pageNumber);
-}
-
-function normalizeBlocks(module) {
-  if (Array.isArray(module.blocks) && module.blocks.length > 0) return module.blocks;
-  const blocks = [];
-  if (module.body) blocks.push({ type: "text", text: module.body });
-  if (module.bullets?.length) blocks.push({ type: "bullets", items: module.bullets });
-  if (module.metrics?.length) blocks.push({ type: "metrics", items: module.metrics });
-  if (module.matrix) blocks.push({ type: "matrix", ...(Array.isArray(module.matrix) ? { items: module.matrix } : module.matrix) });
-  if (module.callout) blocks.push({ type: "callout", ...(typeof module.callout === "string" ? { text: module.callout } : module.callout) });
-  if (module.table) blocks.push({ type: "table", ...module.table });
-  if (module.chart) blocks.push({ type: "chart", ...module.chart });
-  if (module.image) blocks.push({ type: "image", ...(typeof module.image === "string" ? { path: module.image } : module.image) });
-  return blocks;
 }
 
 function blockWeight(block) {
@@ -403,8 +384,8 @@ function naturalBlockHeight(block, width) {
     return Math.max(0.55, estimatedTextHeight(text, width));
   }
   if (type === "table") {
-    const headers = tableModel.tableHeaderRows(block);
-    const columns = tableModel.tableColumns(block);
+    const headers = tableHeaderRows(block);
+    const columns = tableColumns(block);
     const widths = normalizeColumnWidths(block, columns, width);
     return [...headers.map((row) => estimateTableRowHeight(row, widths, { header: true })), ...(block.rows ?? []).map((row) => estimateTableRowHeight(row, widths))]
       .reduce((sum, value) => sum + value, 0);
@@ -632,20 +613,8 @@ function numericValue(value) {
   return typeof value === "number" || /^[-+]?\d[\d,.]*(%|万|亿|元)?$/.test(String(value).trim());
 }
 
-function tableCellText(cell) {
-  return cell && typeof cell === "object" && !Array.isArray(cell)
-    ? String(cell.text ?? "")
-    : String(cell ?? "");
-}
-
-function tableCellSpan(cell) {
-  if (!cell || typeof cell !== "object" || Array.isArray(cell)) return 1;
-  const span = Number(cell.colspan ?? cell.options?.colspan ?? 1);
-  return Number.isInteger(span) && span > 0 ? span : 1;
-}
-
 function styleTableCell(cell, context, { header, rowIndex }) {
-  const value = tableCellText(cell);
+  const value = cellText(cell);
   const provided = cell && typeof cell === "object" && !Array.isArray(cell) ? cell : {};
   const options = {
     ...(header
@@ -683,9 +652,9 @@ function estimateTableRowHeight(row, widths, { header = false } = {}) {
   let column = 0;
   let lines = 1;
   for (const cell of row) {
-    const span = tableCellSpan(cell);
+    const span = cellColspan(cell);
     const cellWidth = widths.slice(column, column + span).reduce((sum, value) => sum + value, 0);
-    lines = Math.max(lines, estimatedWrappedLines(tableCellText(cell), Math.max(0.2, cellWidth - 0.07), BODY_FONT_SIZE));
+    lines = Math.max(lines, estimatedWrappedLines(cellText(cell), Math.max(0.2, cellWidth - 0.07), BODY_FONT_SIZE));
     column += span;
   }
   const lineHeight = (BODY_FONT_SIZE / 72) * BODY_LINE_SPACING;
@@ -763,15 +732,15 @@ function splitRowsByHeight(rows, widths, headerRows, height, segmentCount = 2) {
 }
 
 function addTableBlock(slide, context, block, box) {
-  const headerRows = tableModel.tableHeaderRows(block);
+  const headerRows = tableHeaderRows(block);
   const rows = Array.isArray(block.rows) ? block.rows : [];
   if (headerRows.length === 0) throw new Error("表格必须包含 headers 或 headerRows。 ");
   if (headerRows.length > 3) throw new Error("表格最多支持3行多级表头；请先核对源表结构。 ");
-  const columnCount = tableModel.tableColumns(block);
+  const columnCount = tableColumns(block);
   if (columnCount === 0) throw new Error("表格没有可识别的列。 ");
   for (const [index, row] of rows.entries()) {
-    if (tableModel.logicalColumns(row) !== columnCount) {
-      throw new Error(`表格正文第 ${index + 1} 行为 ${tableModel.logicalColumns(row)} 列，表格应为 ${columnCount} 列；不得删除最左列或其他字段。`);
+    if (logicalColumns(row) !== columnCount) {
+      throw new Error(`表格正文第 ${index + 1} 行为 ${logicalColumns(row)} 列，表格应为 ${columnCount} 列；不得删除最左列或其他字段。`);
     }
   }
 
@@ -1015,8 +984,8 @@ function addTableSlide(slide, context, spec, pageNumber) {
 }
 
 function paginateTableRows(block, box) {
-  const headerRows = tableModel.tableHeaderRows(block);
-  const columnCount = tableModel.tableColumns(block);
+  const headerRows = tableHeaderRows(block);
+  const columnCount = tableColumns(block);
   const widths = normalizeColumnWidths(block, columnCount, box.w);
   const headerHeight = headerRows.reduce((sum, row) => sum + estimateTableRowHeight(row, widths, { header: true }), 0);
   if (headerHeight >= box.h) throw new Error("表格表头超过独立表格页的可用高度。 ");
@@ -1054,8 +1023,8 @@ function expandOversizedTableSlides(slides) {
     }
     const block = spec.table ?? spec;
     const box = { x: 0.6, y: spec.summary ? 1.72 : 1.2, w: 12.1, h: spec.summary ? 5.15 : 5.67 };
-    const headerRows = tableModel.tableHeaderRows(block);
-    const columnCount = tableModel.tableColumns(block);
+    const headerRows = tableHeaderRows(block);
+    const columnCount = tableColumns(block);
     const widths = normalizeColumnWidths(block, columnCount, box.w);
     const totalHeight = [...headerRows.map((row) => estimateTableRowHeight(row, widths, { header: true })), ...(block.rows ?? []).map((row) => estimateTableRowHeight(row, widths))]
       .reduce((sum, value) => sum + value, 0);
@@ -1085,7 +1054,6 @@ function expandOversizedTableSlides(slides) {
 
 function addClosingSlide(slide, context, spec) {
   slide.background = { color: context.theme.colors.white };
-  addLogo(slide, context, "title");
   slide.addText(spec.title || "谢谢", {
     x: 1.2, y: 2.45, w: 10.9, h: 1.3,
     margin: 0, fontFace: context.theme.fontFace, fontSize: 34, bold: true,
@@ -1121,7 +1089,6 @@ export async function buildPptx({ inputPath, outputPath, validate = true }) {
   }
   const runtime = loadPptxGenJS();
   const pptx = new runtime.PptxGenJS();
-  pptx.layout = "LAYOUT_WIDE";
   pptx.author = deck.author || "ppt-maker";
   pptx.company = deck.company || "";
   pptx.subject = deck.subject || "";
